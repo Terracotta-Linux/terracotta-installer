@@ -1,0 +1,22 @@
+[package]
+name        = "terracotta-installer"
+description = "An interactive installer for Terracotta Linux."
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+license      = "MIT"
+
+[[bin]]
+name = "terracotta-installer"
+path = "src/main.rs"
+
+[dependencies]
+# The only dependency: raw mode, the alternate screen, and key events. Styling
+# is hand-written ANSI, the way `kiln` itself writes it — a widget library would
+# be a larger surface than the thirteen screens it would draw.
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
+
+[profile.release]
+opt-level = "s"
+lto       = true
+strip     = true
