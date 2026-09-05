@@ -79,7 +79,7 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
 
     let mut a = Answers {
         disk: disks[0].clone(),
-        hostname: "kiln".into(),
+        hostname: "terracotta".into(),
         timezone: "UTC".into(),
         locale: locales[0].clone(),
         keymap: maps[0].clone(),

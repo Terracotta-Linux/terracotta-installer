@@ -183,9 +183,9 @@ impl Ui {
         } else {
             format!("step {n} of {of}")
         };
-        let left = format!("{BOLD}kiln install{RESET}");
+        let left = format!("{BOLD}terracotta install{RESET}");
         let gap = (self.cols as usize)
-            .saturating_sub(PAD.len() * 2 + "kiln install".len() + right.len())
+            .saturating_sub(PAD.len() * 2 + "terracotta install".len() + right.len())
             .max(1);
         out.push(String::new());
         out.push(format!(
