@@ -80,6 +80,8 @@ pub struct Opt {
     pub heading: bool,
     /// A disk that is currently mounted, say. Shown, explained, not choosable.
     pub enabled: bool,
+    /// Pre-checked when a `multiselect` screen opens.
+    pub checked: bool,
 }
 
 impl Opt {
@@ -89,6 +91,7 @@ impl Opt {
             note: note.into(),
             heading: false,
             enabled: true,
+            checked: false,
         }
     }
 
@@ -98,11 +101,17 @@ impl Opt {
             note: String::new(),
             heading: true,
             enabled: false,
+            checked: false,
         }
     }
 
     pub fn disabled(mut self) -> Opt {
         self.enabled = false;
+        self
+    }
+
+    pub fn checked(mut self) -> Opt {
+        self.checked = true;
         self
     }
 }
@@ -326,7 +335,7 @@ impl Ui {
     /// the module library, which is grouped by namespace and meant to be read.
     pub fn multiselect(&mut self, page: &Page, options: &[Opt]) -> Answer<Vec<usize>> {
         let width = column(options);
-        let mut chosen: Vec<bool> = vec![false; options.len()];
+        let mut chosen: Vec<bool> = options.iter().map(|o| o.checked).collect();
         let selectable: Vec<usize> = (0..options.len())
             .filter(|&i| !options[i].heading && options[i].enabled)
             .collect();

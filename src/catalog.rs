@@ -47,6 +47,9 @@ pub struct Module {
     pub module: &'static str,
     pub label: &'static str,
     pub note: &'static str,
+    /// Pre-checked on the modules screen. Reserved for modules whose absence
+    /// would leave the installed system unable to reproduce or update itself.
+    pub default: bool,
 }
 
 pub enum Entry {
@@ -60,6 +63,19 @@ macro_rules! m {
             module: $path,
             label: $label,
             note: $note,
+            default: false,
+        })
+    };
+}
+
+/// Same as `m!`, but pre-checked on the modules screen.
+macro_rules! d {
+    ($path:literal, $label:literal, $note:literal) => {
+        Entry::Module(Module {
+            module: $path,
+            label: $label,
+            note: $note,
+            default: true,
         })
     };
 }
@@ -71,6 +87,22 @@ macro_rules! m {
 /// conflict by design), `@kiln/boot/grub2` and `@kiln/hardware/firmware` (every
 /// profile has them already).
 pub const EXTRAS: &[Entry] = &[
+    Entry::Group("terracotta"),
+    m!(
+        "@kiln/terracotta/installer",
+        "installer",
+        "keeps terracotta-installer available on the deployed system"
+    ),
+    d!(
+        "@kiln/terracotta/kiln",
+        "kiln",
+        "the build tool itself, on the deployed system — highly recommended"
+    ),
+    d!(
+        "@kiln/terracotta/branding",
+        "branding",
+        "Terracotta Linux branding — highly recommended"
+    ),
     Entry::Group("desktop"),
     m!(
         "@kiln/desktop/gnome-minimal",

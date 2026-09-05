@@ -286,7 +286,14 @@ fn modules_screen(
         .iter()
         .map(|e| match e {
             Entry::Group(g) => Opt::heading(*g),
-            Entry::Module(m) => Opt::new(m.label, m.note),
+            Entry::Module(m) => {
+                let opt = Opt::new(m.label, m.note);
+                if m.default {
+                    opt.checked()
+                } else {
+                    opt
+                }
+            }
         })
         .collect();
     let chosen = ui.multiselect(&page, &options)?;

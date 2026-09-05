@@ -39,7 +39,10 @@ jobs:
         id: pkg
         run: |
           cd packaging
-          pkgfile=$(ls -- *.pkg.tar.zst | head -n1)
+          built=$(ls -- *.pkg.tar.zst | head -n1)
+          arch=$(echo "$built" | sed -E 's/^.*-([^-]+)\.pkg\.tar\.zst$/\1/')
+          pkgfile="terracotta-installer-${arch}.pkg.tar.zst"
+          mv -- "$built" "$pkgfile"
           sha256sum "$pkgfile" > "$pkgfile.sha256"
           echo "pkgfile=$pkgfile" >> "$GITHUB_OUTPUT"
 
