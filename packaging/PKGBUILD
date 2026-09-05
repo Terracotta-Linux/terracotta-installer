@@ -1,0 +1,36 @@
+# Maintainer: Abdullah AL-Swedi
+#
+# Standalone: this file works on its own, fetching the source from git
+# rather than assuming it is sitting inside the checkout it packages.
+# Tracks a tagged release — bump pkgver (and tag the release `v$pkgver`
+# upstream) rather than pointing this at a branch.
+
+pkgname=terracotta-installer
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="An interactive installer for Terracotta Linux."
+arch=('x86_64')
+url="https://github.com/Terracotta-Linux/terracotta-installer"
+license=('MIT')
+depends=('terracotta-kiln' 'gptfdisk' 'e2fsprogs' 'dosfstools' 'util-linux' 'coreutils' 'parted' 'systemd')
+makedepends=('cargo' 'git')
+options=('!lto')
+source=("$pkgname-$pkgver::git+https://github.com/Terracotta-Linux/terracotta-installer.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+build() {
+	cd "$srcdir/$pkgname-$pkgver"
+	cargo build --release --locked
+}
+
+check() {
+	cd "$srcdir/$pkgname-$pkgver"
+	cargo test --release --locked
+}
+
+package() {
+	cd "$srcdir/$pkgname-$pkgver"
+	install -Dm755 target/release/terracotta-installer "$pkgdir/usr/bin/terracotta-installer"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
