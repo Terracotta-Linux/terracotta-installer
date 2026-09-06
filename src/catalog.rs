@@ -87,6 +87,8 @@ macro_rules! d {
 /// conflict by design), `@kiln/boot/grub2` and `@kiln/hardware/firmware` (every
 /// profile has them already).
 pub const EXTRAS: &[Entry] = &[
+    Entry::Group("boot"),
+    m!("@kiln/boot/plymouth", "plymouth", "boot splash"),
     Entry::Group("terracotta"),
     m!(
         "@kiln/terracotta/installer",
@@ -102,6 +104,11 @@ pub const EXTRAS: &[Entry] = &[
         "@kiln/terracotta/branding",
         "branding",
         "Terracotta Linux branding — highly recommended"
+    ),
+    m!(
+        "@kiln/terracotta/branding-plymouth",
+        "branding (boot splash)",
+        "the Terracotta Plymouth theme — needs the plymouth module above"
     ),
     Entry::Group("desktop"),
     m!(
