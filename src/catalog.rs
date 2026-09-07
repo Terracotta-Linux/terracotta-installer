@@ -235,7 +235,17 @@ pub const EXTRAS: &[Entry] = &[
     m!("@kiln/dev/go", "go", "Go toolchain"),
     Entry::Group("virtualization"),
     m!("@kiln/virt/podman", "podman", "rootless containers"),
-    m!("@kiln/virt/docker", "docker", "Docker"),
+    m!(
+        "@kiln/virt/lilipod",
+        "lilipod",
+        "a static podman stand-in — no daemon, AUR-only"
+    ),
+    m!("@kiln/virt/docker", "docker", "Docker, buildx and Compose"),
+    m!(
+        "@kiln/virt/distrobox",
+        "distrobox",
+        "containers that feel like the host — needs podman, docker or lilipod"
+    ),
     m!("@kiln/virt/libvirt", "libvirt", "QEMU/KVM"),
     Entry::Group("security"),
     m!(
