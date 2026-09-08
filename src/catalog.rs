@@ -177,6 +177,11 @@ pub const EXTRAS: &[Entry] = &[
         "built against `linux-lts` — pair with the server profile"
     ),
     m!(
+        "@kiln/gpu/nvidia-open-dkms",
+        "nvidia-open-dkms",
+        "built via DKMS at image-build time — for linux-zen, linux-hardened, linux-rt"
+    ),
+    m!(
         "@kiln/gpu/nvidia-cuda",
         "nvidia-cuda",
         "CUDA and cuDNN, on top of an nvidia-open driver"
