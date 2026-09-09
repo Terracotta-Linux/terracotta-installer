@@ -9,8 +9,7 @@
 //! |---|---|---|
 //! | profile, modules, extra packages | `include`, `packages.repo` | image content, plainly |
 //! | the disk's `root=` | `kernel.cmdline` | kargs are fully declarative, so a karg not written down is one the next `kiln apply` removes |
-//! | locale generation | a `[[script]]` | the archive lives in `/usr/lib/locale`; changing it needs a rebuild |
-//! | `LANG`, `KEYMAP` | `[[file]]` | to write a config file, write a file |
+//! | `KEYMAP`, `LANG`, locale generation | `[system]` | Kiln's own `[system]` table now materializes all three; writing them as a `[[file]]` plus a `locale-gen` `[[script]]` is refused outright as of the version that added it — `[system]` owns those targets |
 //!
 //! The generated file is meant to be **read and then edited**. It is the user's
 //! configuration from the moment the installer exits, so it is commented the
@@ -49,49 +48,32 @@ pub fn system_toml(a: &Answers) -> String {
         s.push_str("]\n\n");
     }
 
-    s.push_str(&format!(
-        "[[file]]\n\
-         target  = \"/etc/locale.conf\"\n\
-         content = \"LANG={}\\n\"\n\n\
-         [[file]]\n\
-         target  = \"/etc/vconsole.conf\"\n\
-         content = \"KEYMAP={}\\n\"\n",
-        a.locale, a.keymap
-    ));
-
-    if let Some(script) = locale_script(&a.locale) {
-        s.push('\n');
-        s.push_str(&script);
-    }
+    s.push_str(&format!("[system]\nkeymap = \"{}\"\n", a.keymap));
+    s.push_str(&locale_field(&a.locale));
 
     s
 }
 
-/// The one build script the installer writes.
+/// The `system.locale` value: `lang` always, plus `generate` for anything
+/// beyond the one locale glibc's stock archive already carries.
 ///
 /// glibc ships a locale *archive* containing `C.UTF-8` and nothing else; every
 /// other locale has to be compiled, and the result lands in `/usr/lib/locale`,
-/// which is image content by any reading of the test. Kiln's own guide uses
-/// `locale-gen` as its worked example for exactly this reason, including the
-/// part where a script rewriting glibc's own `locale.gen` is *reported*
-/// rather than refused.
+/// which is image content by any reading of the test. Kiln now runs
+/// `locale-gen` itself during assembly whenever `system.locale.generate` is
+/// non-empty, so naming the locale here is the whole of what used to be a
+/// hand-written build script.
 ///
-/// A multi-line **literal** string (`'''`), not a basic one: `printf '%s\n'`
-/// inside `"""` would have its `\n` eaten by TOML before the shell ever saw it.
-fn locale_script(locale: &str) -> Option<String> {
+/// `generate` wants `locale.gen`'s own two-column form (`"en_US.UTF-8
+/// UTF-8"`), and the second column is the same suffix already on the first —
+/// `/usr/share/i18n/SUPPORTED`, which `catalog::locales` reads its names from,
+/// carries it as exactly that suffix for every UTF-8 locale.
+fn locale_field(locale: &str) -> String {
     if locale == "C.UTF-8" || locale == "C" {
-        return None;
+        return format!("locale = {{ lang = \"{locale}\" }}\n");
     }
     let charmap = locale.rsplit('.').next().unwrap_or("UTF-8");
-    Some(format!(
-        "[[script]]\n\
-         name    = \"20-locale\"\n\
-         after   = \"packages\"\n\
-         content = '''\n\
-         printf '%s %s\\n' '{locale}' '{charmap}' > /etc/locale.gen\n\
-         locale-gen\n\
-         '''\n"
-    ))
+    format!("locale = {{ lang = \"{locale}\", generate = [\"{locale} {charmap}\"] }}\n")
 }
 
 #[cfg(test)]
@@ -192,7 +174,7 @@ mod tests {
             system_toml(&answers()),
         );
         let shown = String::from_utf8_lossy(&out.stdout);
-        for expected in ["root=UUID=1234-abcd", "/etc/locale.conf", "20-locale"] {
+        for expected in ["root=UUID=1234-abcd", "keymap=us", "lang=en_US.UTF-8"] {
             assert!(
                 shown.contains(expected),
                 "`{expected}` missing from:\n{shown}"
@@ -209,11 +191,26 @@ mod tests {
     }
 
     #[test]
-    fn c_utf8_needs_no_script() {
-        assert!(locale_script("C.UTF-8").is_none());
-        let de = locale_script("de_DE.UTF-8").expect("a script");
-        assert!(de.contains("locale-gen"));
-        // A literal string, so `\n` survives TOML and reaches printf.
-        assert!(de.contains("'''"), "{de}");
+    fn c_utf8_needs_no_generate() {
+        assert_eq!(locale_field("C.UTF-8"), "locale = { lang = \"C.UTF-8\" }\n");
+        let de = locale_field("de_DE.UTF-8");
+        assert!(de.contains("generate = [\"de_DE.UTF-8 UTF-8\"]"), "{de}");
+    }
+
+    #[test]
+    fn the_system_table_replaces_the_old_file_and_script() {
+        let toml = system_toml(&answers());
+        assert!(toml.contains("[system]"), "{toml}");
+        assert!(toml.contains("keymap = \"us\""), "{toml}");
+        assert!(
+            toml.contains("generate = [\"en_US.UTF-8 UTF-8\"]"),
+            "{toml}"
+        );
+        for gone in ["[[file]]", "[[script]]", "locale-gen", "/etc/locale.conf"] {
+            assert!(
+                !toml.contains(gone),
+                "`{gone}` should no longer appear:\n{toml}"
+            );
+        }
     }
 }

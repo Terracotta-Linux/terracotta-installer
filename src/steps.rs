@@ -589,9 +589,9 @@ impl Installer<'_> {
     /// every generation after this one.
     ///
     /// `LANG` and `KEYMAP` are **not** set here even though `systemd-firstboot`
-    /// would happily do it: `config.rs` writes them as `[[file]]`s, and two
-    /// places setting the same value is exactly the ambiguity Kiln refuses
-    /// everywhere else.
+    /// would happily do it: `config.rs` writes them into `[system]`, which
+    /// Kiln now materializes itself, and two places setting the same value is
+    /// exactly the ambiguity Kiln refuses everywhere else.
     fn accounts(&mut self, ui: &mut Ui, p: &mut Progress, dep: &Path, a: &Answers) -> Done {
         let guard = self.enter(ui, p, dep)?;
         let root = guard.root.display().to_string();
