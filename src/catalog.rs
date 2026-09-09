@@ -247,6 +247,11 @@ pub const EXTRAS: &[Entry] = &[
     ),
     m!("@kiln/virt/docker", "docker", "Docker, buildx and Compose"),
     m!(
+        "@kiln/virt/nvidia-docker",
+        "nvidia-docker",
+        "docker plus the NVIDIA Container Toolkit — needs an nvidia-open driver too"
+    ),
+    m!(
         "@kiln/virt/distrobox",
         "distrobox",
         "containers that feel like the host — needs podman, docker or lilipod"
