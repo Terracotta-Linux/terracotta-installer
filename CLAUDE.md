@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```console
 $ cargo build                       # debug
 $ cargo build --release
-$ cargo test                        # 22 tests, none of which touch a disk
+$ cargo test                        # 27 tests, none of which touch a disk
 $ cargo test the_bootloader_comes_after_the_deploy       # one test by name
 $ cargo test config::tests -- --nocapture                # one module, with output
 $ cargo fmt && cargo clippy --all-targets                # both are expected to be clean
@@ -52,7 +52,7 @@ main.rs  preflight::check → interview::ask → Answers → steps::Installer::i
 - **`preflight.rs`** — every check corresponds to a way the install fails *after* the disk is
   erased. Its `Problem`s are hard blocks with no warning channel; do not add a check whose
   right response is "continue anyway".
-- **`interview.rs`** — a state machine, not a run of prompts, because Esc goes back thirteen
+- **`interview.rs`** — a state machine, not a run of prompts, because Esc goes back fourteen
   screens. Produces `Answers`, touches nothing.
 - **`steps.rs`** — the only module that writes anything. `STEPS` is the fixed order the
   install runs in, and its order is asserted by tests rather than only commented.

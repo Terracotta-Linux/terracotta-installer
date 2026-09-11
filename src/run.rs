@@ -80,11 +80,14 @@ impl Runner {
 
     /// Run a command and write `stdin` to it.
     ///
-    /// The one caller is `chpasswd`, and the reason it exists rather than
-    /// `usermod -p` is that a password on a command line is visible in `ps` to
-    /// every process on the machine for as long as the call takes. What goes in
-    /// on stdin is **never logged** — the log records that something was piped
-    /// and how many bytes, and nothing else.
+    /// The callers are `chpasswd` and `cryptsetup`, and the reason this exists
+    /// rather than `usermod -p` or a `cryptsetup` prompt is the same for both:
+    /// a secret on a command line is visible in `ps` to every process on the
+    /// machine for as long as the call takes, and a secret cryptsetup reads
+    /// from the real terminal would fight the raw mode and alternate screen
+    /// this program already holds. What goes in on stdin is **never logged**
+    /// — the log records that something was piped and how many bytes, and
+    /// nothing else.
     pub fn run_stdin(
         &mut self,
         what: &str,

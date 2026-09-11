@@ -9,6 +9,7 @@
 //! |---|---|---|
 //! | profile, modules, extra packages | `include`, `packages.repo` | image content, plainly |
 //! | the disk's `root=` | `kernel.cmdline` | kargs are fully declarative, so a karg not written down is one the next `kiln apply` removes |
+//! | LUKS unlock (`rd.luks.*`, `dracut_modules = ["crypt"]`, `cryptsetup`) | `kernel.cmdline`, `kernel.dracut_modules`, `packages.repo` | the initramfs unlocks root before anything else runs, so this is exactly as declarative as `root=` itself — see `Answers::luks_uuid` |
 //! | `KEYMAP`, `LANG`, locale generation | `[system]` | Kiln's own `[system]` table now materializes all three; writing them as a `[[file]]` plus a `locale-gen` `[[script]]` is refused outright as of the version that added it — `[system]` owns those targets |
 //!
 //! The generated file is meant to be **read and then edited**. It is the user's
@@ -33,16 +34,37 @@ pub fn system_toml(a: &Answers) -> String {
     }
     s.push_str("]\n\n");
 
-    s.push_str(&format!(
-        "[kernel]\ncmdline = [\"root=UUID={}\"]\n\n",
-        a.root_uuid
-    ));
+    // The initramfs unlocks root before anything else runs — dracut's crypt
+    // module reads `rd.luks.uuid`/`rd.luks.name` off the cmdline, the same
+    // place `root=` already lives, which is why this needs no `[[file]]` for
+    // `/etc/crypttab`: the root device is open by the time systemd, and
+    // crypttab, would otherwise get a say.
+    match &a.luks_uuid {
+        Some(uuid) => s.push_str(&format!(
+            "[kernel]\ncmdline = [\"rd.luks.uuid={uuid}\", \"rd.luks.name={uuid}=root\", \
+             \"root=/dev/mapper/root\"]\ndracut_modules = [\"crypt\"]\n\n"
+        )),
+        None => s.push_str(&format!(
+            "[kernel]\ncmdline = [\"root=UUID={}\"]\n\n",
+            a.root_uuid
+        )),
+    }
 
-    if a.packages.is_empty() {
+    // `cryptsetup` ships dracut's crypt module — without it in the image,
+    // `--add crypt` finds nothing and the build fails during dracut's own
+    // verification, several minutes into a build the interview already
+    // promised would produce a bootable disk.
+    let mut packages = a.packages.clone();
+    if a.luks_uuid.is_some() {
+        packages.push("cryptsetup".to_string());
+    }
+    packages.sort();
+    packages.dedup();
+    if packages.is_empty() {
         s.push_str("[packages]\nrepo = []\n\n");
     } else {
         s.push_str("[packages]\nrepo = [\n");
-        for p in &a.packages {
+        for p in &packages {
             s.push_str(&format!("  \"{p}\",\n"));
         }
         s.push_str("]\n\n");
@@ -101,8 +123,19 @@ mod tests {
             username: "ada".into(),
             user_password: "secret".into(),
             root_password: String::new(),
+            encrypt: false,
+            passphrase: String::new(),
             root_uuid: "1234-abcd".into(),
+            luks_uuid: None,
         }
+    }
+
+    fn encrypted_answers() -> Answers {
+        let mut a = answers();
+        a.encrypt = true;
+        a.passphrase = "correct horse battery staple".into();
+        a.luks_uuid = Some("deadbeef-dead-beef-dead-beefdeadbeef".into());
+        a
     }
 
     #[test]
@@ -134,6 +167,45 @@ mod tests {
         }
     }
 
+    /// An encrypted root writes `rd.luks.*` and `root=/dev/mapper/root`
+    /// instead of `root=UUID=…`, and never the plain filesystem UUID: a
+    /// generation deployed with the wrong one of the two boots straight to
+    /// an emergency shell, since `ostree-prepare-root` gets a device that is
+    /// still a locked LUKS container.
+    #[test]
+    fn an_encrypted_root_gets_luks_kargs_instead_of_a_uuid() {
+        let toml = system_toml(&encrypted_answers());
+        assert!(
+            toml.contains("rd.luks.uuid=deadbeef-dead-beef-dead-beefdeadbeef"),
+            "{toml}"
+        );
+        assert!(
+            toml.contains("rd.luks.name=deadbeef-dead-beef-dead-beefdeadbeef=root"),
+            "{toml}"
+        );
+        assert!(toml.contains("root=/dev/mapper/root"), "{toml}");
+        assert!(toml.contains("dracut_modules = [\"crypt\"]"), "{toml}");
+        assert!(!toml.contains("root=UUID=1234-abcd"), "{toml}");
+    }
+
+    #[test]
+    fn an_encrypted_image_gets_cryptsetup() {
+        let toml = system_toml(&encrypted_answers());
+        assert!(toml.contains("\"cryptsetup\""), "{toml}");
+        // …and an unencrypted one does not carry a package it has no use for.
+        assert!(!system_toml(&answers()).contains("cryptsetup"));
+    }
+
+    #[test]
+    fn no_passphrase_reaches_the_configuration() {
+        let toml = system_toml(&encrypted_answers());
+        assert!(
+            !toml.contains("correct horse battery staple"),
+            "the passphrase is in the generated config; it is piped to \
+             `cryptsetup` and nowhere else\n{toml}"
+        );
+    }
+
     /// The one test that proves the generated file is a *Kiln* configuration
     /// rather than merely valid TOML.
     ///
@@ -146,18 +218,63 @@ mod tests {
     /// without anybody noticing.
     #[test]
     fn kiln_accepts_what_the_installer_writes() {
+        let Some(shown) = kiln_show(&system_toml(&answers())) else {
+            return;
+        };
+        for expected in ["root=UUID=1234-abcd", "keymap=us", "lang=en_US.UTF-8"] {
+            assert!(
+                shown.contains(expected),
+                "`{expected}` missing from:\n{shown}"
+            );
+        }
+    }
+
+    /// The same check, over the branch `kiln_accepts_what_the_installer_writes`
+    /// does not reach: `rd.luks.*`, `dracut_modules`, and `cryptsetup` are a
+    /// second way to write a table header or a key name wrong, and the plain
+    /// config passing `kiln show` proves nothing about this one.
+    #[test]
+    fn kiln_accepts_the_encrypted_configuration() {
+        let Some(shown) = kiln_show(&system_toml(&encrypted_answers())) else {
+            return;
+        };
+        for expected in [
+            "rd.luks.uuid=deadbeef-dead-beef-dead-beefdeadbeef",
+            "root=/dev/mapper/root",
+            "cryptsetup",
+        ] {
+            assert!(
+                shown.contains(expected),
+                "`{expected}` missing from:\n{shown}"
+            );
+        }
+    }
+
+    /// Runs `kiln show` over generated TOML and returns its stdout, or `None`
+    /// when there is no real Kiln to check against — see the module doc on
+    /// why this program keeps a copy of Kiln's schema instead of depending on
+    /// it, and why that copy is checked here rather than trusted.
+    fn kiln_show(toml: &str) -> Option<String> {
         let (Some(kiln), Some(modules)) = (
             crate::catalog::probe::binary(),
             crate::catalog::probe::module_root(),
         ) else {
             eprintln!("skipping: no `kiln` binary and module library to check against");
-            return;
+            return None;
         };
 
-        let dir = std::env::temp_dir().join(format!("terracotta-installer-{}", std::process::id()));
+        // Thread-unique, not just process-unique: cargo runs this module's
+        // tests on separate threads of the same process, and two of them
+        // sharing a directory is a race between one's `write` and the
+        // other's `remove_dir_all`.
+        let dir = std::env::temp_dir().join(format!(
+            "terracotta-installer-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let etc = dir.join("etc/kiln");
         std::fs::create_dir_all(&etc).expect("a config directory");
-        std::fs::write(etc.join("system.toml"), system_toml(&answers())).expect("system.toml");
+        std::fs::write(etc.join("system.toml"), toml).expect("system.toml");
 
         let out = std::process::Command::new(&kiln)
             .args(["--config".as_ref(), etc.as_os_str()])
@@ -171,15 +288,9 @@ mod tests {
             out.status.success(),
             "`kiln show` rejected the generated configuration:\n{}\n{}",
             String::from_utf8_lossy(&out.stderr),
-            system_toml(&answers()),
+            toml,
         );
-        let shown = String::from_utf8_lossy(&out.stdout);
-        for expected in ["root=UUID=1234-abcd", "keymap=us", "lang=en_US.UTF-8"] {
-            assert!(
-                shown.contains(expected),
-                "`{expected}` missing from:\n{shown}"
-            );
-        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     #[test]

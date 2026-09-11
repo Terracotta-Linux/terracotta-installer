@@ -30,6 +30,7 @@ const NEEDED: &[(&str, &str)] = &[
     ("partprobe", "pacman -S parted"),
     ("udevadm", "pacman -S systemd"),
     ("wipefs", "pacman -S util-linux"),
+    ("cryptsetup", "pacman -S cryptsetup"),
 ];
 
 pub fn check(module_root: &Path) -> Vec<Problem> {

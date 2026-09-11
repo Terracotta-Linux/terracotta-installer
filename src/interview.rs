@@ -12,7 +12,7 @@
 use crate::block::{self, Disk};
 use crate::catalog::{self, Entry};
 use crate::run::Runner;
-use crate::tui::{Nav, Opt, Page, Ui, ACCENT, BOLD, DANGER, DIM, RESET, WARN};
+use crate::tui::{Nav, Opt, Page, Ui, ACCENT, BOLD, DANGER, DIM, OK, RESET, WARN};
 use std::path::Path;
 
 /// Everything the install needs to know.
@@ -30,10 +30,23 @@ pub struct Answers {
     /// Empty means the root account is left locked, which is only offered when
     /// something in the configuration grants `wheel` sudo.
     pub root_password: String,
+    /// Whether the root partition is LUKS2. `/boot` and the ESP are always
+    /// written in the clear — GRUB reads neither through its own (fragile)
+    /// LUKS support, only the initramfs unlocks anything, and it does that
+    /// from the kernel cmdline, not from a passphrase GRUB has to know.
+    pub encrypt: bool,
+    /// Asked once, twice, only when `encrypt` is set. Piped to `cryptsetup`
+    /// over stdin and never written anywhere — not the log, not the
+    /// configuration. Empty when `encrypt` is false.
+    pub passphrase: String,
     /// Not asked — filled in by `steps.rs` once `mkfs.ext4` has made one, and
     /// read back out of `blkid`. It is in `Answers` because it is an input to
     /// `config.rs`, and `config.rs` should have exactly one argument.
     pub root_uuid: String,
+    /// The LUKS container's own UUID — not the filesystem's — filled in by
+    /// `steps.rs` from `cryptsetup luksUUID` when `encrypt` is set. `None`
+    /// otherwise. This is what `rd.luks.uuid=` has to name.
+    pub luks_uuid: Option<String>,
 }
 
 impl Answers {
@@ -49,7 +62,7 @@ impl Answers {
     }
 }
 
-const SCREENS: usize = 13;
+const SCREENS: usize = 14;
 
 /// Ask everything. `Ok(None)` is Ctrl-C at any point: nothing has been written,
 /// so quitting is always free.
@@ -89,7 +102,10 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
         username: String::new(),
         user_password: String::new(),
         root_password: String::new(),
+        encrypt: false,
+        passphrase: String::new(),
         root_uuid: String::new(),
+        luks_uuid: None,
     };
 
     let mut at = 0usize;
@@ -97,9 +113,10 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
         let step = (at + 1, SCREENS);
         let outcome = match at {
             0 => disk_screen(ui, step, &disks, &mut a),
-            1 => confirm_screen(ui, step, &a),
-            2 => hostname_screen(ui, step, &mut a),
-            3 => pick(
+            1 => encrypt_screen(ui, step, &mut a),
+            2 => confirm_screen(ui, step, &a),
+            3 => hostname_screen(ui, step, &mut a),
+            4 => pick(
                 ui,
                 step,
                 "Timezone",
@@ -107,7 +124,7 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
                 &zones,
                 &mut a.timezone,
             ),
-            4 => pick(
+            5 => pick(
                 ui,
                 step,
                 "Locale",
@@ -115,7 +132,7 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
                 &locales,
                 &mut a.locale,
             ),
-            5 => pick(
+            6 => pick(
                 ui,
                 step,
                 "Console keymap",
@@ -123,12 +140,12 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
                 &maps,
                 &mut a.keymap,
             ),
-            6 => profile_screen(ui, step, &profiles, &mut a),
-            7 => modules_screen(ui, step, &extras, &mut a),
-            8 => packages_screen(ui, step, &mut a),
-            9 => username_screen(ui, step, &mut a),
-            10 => password_screen(ui, step, &mut a),
-            11 => root_password_screen(ui, step, &mut a),
+            7 => profile_screen(ui, step, &profiles, &mut a),
+            8 => modules_screen(ui, step, &extras, &mut a),
+            9 => packages_screen(ui, step, &mut a),
+            10 => username_screen(ui, step, &mut a),
+            11 => password_screen(ui, step, &mut a),
+            12 => root_password_screen(ui, step, &mut a),
             _ => review_screen(ui, step, &a),
         };
         match outcome {
@@ -201,6 +218,11 @@ fn confirm_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
             "{WARN}This is a removable disk. Make sure it is not the medium you booted.{RESET}"
         ));
     }
+    let root_row = if a.encrypt {
+        format!("  {ACCENT}3{RESET}  rest LUKS2 → ext4        → /")
+    } else {
+        format!("  {ACCENT}3{RESET}  rest ext4                 → /")
+    };
     let page = page
         .note(String::new())
         .note(format!(
@@ -215,10 +237,45 @@ fn confirm_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
         .note(format!(
             "  {ACCENT}2{RESET}  1G   ext4                   → /boot"
         ))
-        .note(format!(
-            "  {ACCENT}3{RESET}  rest ext4                   → /"
-        ));
+        .note(root_row);
     ui.typed_confirm(&page, &d.word())
+}
+
+/// Whether the root partition is LUKS2, and the passphrase if so.
+///
+/// One screen, not two: the select and the secret prompt are both driven from
+/// here so that Esc from the passphrase field returns to the yes/no choice
+/// rather than to the previous top-level screen, and picking "No" never draws
+/// a passphrase field at all. `/boot` and the ESP are never offered — see the
+/// note on `Answers::encrypt`.
+fn encrypt_screen(ui: &mut Ui, step: (usize, usize), a: &mut Answers) -> Screen {
+    let page = Page::new(step, "Encrypt the disk?")
+        .note("LUKS2 over the root partition. /boot and the EFI system partition stay")
+        .note("in the clear — GRUB never needs to unlock anything, the initramfs does")
+        .note("that at boot from a passphrase you type there, not from this one.");
+    loop {
+        let options = vec![
+            Opt::new("No", "root is written in the clear"),
+            Opt::new(
+                "Yes",
+                "cryptsetup luksFormat; unlocked at every boot with a passphrase",
+            ),
+        ];
+        let i = ui.select(&page, &options)?;
+        a.encrypt = i == 1;
+        if !a.encrypt {
+            a.passphrase.clear();
+            return Ok(());
+        }
+        match ui.secret(&page, "passphrase", false) {
+            Ok(p) => {
+                a.passphrase = p;
+                return Ok(());
+            }
+            Err(Nav::Back) => continue,
+            Err(Nav::Quit) => return Err(Nav::Quit),
+        }
+    }
 }
 
 fn hostname_screen(ui: &mut Ui, step: (usize, usize), a: &mut Answers) -> Screen {
@@ -403,6 +460,14 @@ fn review_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
                 a.disk.path,
                 a.disk.size()
             ),
+        ),
+        (
+            "encryption".into(),
+            if a.encrypt {
+                format!("{OK}LUKS2, root only{RESET}")
+            } else {
+                format!("{DIM}none{RESET}")
+            },
         ),
         ("hostname".into(), a.hostname.clone()),
         ("timezone".into(), a.timezone.clone()),

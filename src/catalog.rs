@@ -264,6 +264,17 @@ pub const EXTRAS: &[Entry] = &[
         "members of `wheel` may sudo"
     ),
     m!("@kiln/security/apparmor", "apparmor", "AppArmor, enforcing"),
+    Entry::Group("system"),
+    m!(
+        "@kiln/system/zram",
+        "zram",
+        "compressed swap in RAM, sized to half of it"
+    ),
+    m!(
+        "@kiln/system/swapfile",
+        "swapfile",
+        "a 4GiB file under /var, created on first boot"
+    ),
 ];
 
 /// `@kiln/desktop/gnome` → `<module root>/desktop/gnome.toml`.

@@ -84,10 +84,16 @@ pub struct Installer<'a> {
 struct Layout {
     esp: String,
     boot: String,
+    /// What `format()`, `mount()` and `blkid` operate on for root: the raw
+    /// partition, or `/dev/mapper/root` once `partition()` has opened it.
     root: String,
     esp_uuid: String,
     boot_uuid: String,
     root_uuid: String,
+    /// `cryptsetup luksUUID` of the root partition, when `Answers::encrypt`
+    /// was set — what `rd.luks.uuid=` in the generated cmdline has to name.
+    /// `None` on a plain, unencrypted root.
+    luks_uuid: Option<String>,
 }
 
 impl Installer<'_> {
@@ -121,6 +127,7 @@ impl Installer<'_> {
         step!(ui, p, 3, "kiln sysroot init", self.sysroot(ui, &mut p));
 
         a.root_uuid = layout.root_uuid.clone();
+        a.luks_uuid = layout.luks_uuid.clone();
         step!(
             ui,
             p,
@@ -169,53 +176,121 @@ impl Installer<'_> {
     /// `systemd-gpt-auto-generator` to mount it — and on an OSTree system the
     /// thing that mounts the root is `ostree-prepare-root` from the initramfs,
     /// working from the `root=` karg, which Kiln's fully-declarative kargs
-    /// insist on writing down.
+    /// insist on writing down. `8300` regardless of `Answers::encrypt`: the
+    /// partition table has no LUKS typecode of its own, `blkid` identifies a
+    /// LUKS container by its header rather than by the GPT type, and this
+    /// step ends by handing the *same* partition to `cryptsetup luksFormat`
+    /// when encryption was chosen — see `luks_format_and_open`.
     fn partition(&mut self, ui: &mut Ui, p: &mut Progress, a: &Answers) -> Result<Layout, Failed> {
         let disk = a.disk.path.clone();
-        let mut say = say(ui, p);
-        self.run
-            .run("wiping signatures", &["wipefs", "--all", &disk], &mut say)?;
-        self.run.run(
-            "zapping the partition table",
-            &["sgdisk", "--zap-all", &disk],
-            &mut say,
-        )?;
-        self.run.run(
-            "creating partitions",
-            &[
-                "sgdisk",
-                &format!("--new=1:0:+{ESP_MIB}M"),
-                "--typecode=1:ef00",
-                "--change-name=1:EFI system partition",
-                &format!("--new=2:0:+{BOOT_MIB}M"),
-                "--typecode=2:8300",
-                "--change-name=2:terracotta-boot",
-                "--new=3:0:0",
-                "--typecode=3:8300",
-                "--change-name=3:terracotta-root",
-                &disk,
-            ],
-            &mut say,
-        )?;
-        // Between `sgdisk` returning and the kernel publishing the new device
-        // nodes there is a window in which `mkfs` gets ENOENT. `partprobe` asks
-        // for the reread and `udevadm settle` waits for udev to have finished
-        // acting on it; skipping either is a race that fails on fast disks.
-        self.run.run(
-            "rereading the partition table",
-            &["partprobe", &disk],
-            &mut say,
-        )?;
-        self.run
-            .run("waiting for udev", &["udevadm", "settle"], &mut say)?;
+        {
+            let mut say = say(ui, p);
+            self.run
+                .run("wiping signatures", &["wipefs", "--all", &disk], &mut say)?;
+            self.run.run(
+                "zapping the partition table",
+                &["sgdisk", "--zap-all", &disk],
+                &mut say,
+            )?;
+            self.run.run(
+                "creating partitions",
+                &[
+                    "sgdisk",
+                    &format!("--new=1:0:+{ESP_MIB}M"),
+                    "--typecode=1:ef00",
+                    "--change-name=1:EFI system partition",
+                    &format!("--new=2:0:+{BOOT_MIB}M"),
+                    "--typecode=2:8300",
+                    "--change-name=2:terracotta-boot",
+                    "--new=3:0:0",
+                    "--typecode=3:8300",
+                    "--change-name=3:terracotta-root",
+                    &disk,
+                ],
+                &mut say,
+            )?;
+            // Between `sgdisk` returning and the kernel publishing the new
+            // device nodes there is a window in which `mkfs` gets ENOENT.
+            // `partprobe` asks for the reread and `udevadm settle` waits for
+            // udev to have finished acting on it; skipping either is a race
+            // that fails on fast disks.
+            self.run.run(
+                "rereading the partition table",
+                &["partprobe", &disk],
+                &mut say,
+            )?;
+            self.run
+                .run("waiting for udev", &["udevadm", "settle"], &mut say)?;
+        }
+        let root_part = a.disk.partition(3);
+        let (root, luks_uuid) = if a.encrypt {
+            self.luks_format_and_open(ui, p, &root_part, &a.passphrase)?
+        } else {
+            (root_part, None)
+        };
         Ok(Layout {
             esp: a.disk.partition(1),
             boot: a.disk.partition(2),
-            root: a.disk.partition(3),
+            root,
             esp_uuid: String::new(),
             boot_uuid: String::new(),
             root_uuid: String::new(),
+            luks_uuid,
         })
+    }
+
+    /// LUKS2 over the root partition, opened at `/dev/mapper/root`.
+    ///
+    /// `--key-file=-` on both calls, not an interactive prompt: `cryptsetup`
+    /// reading from the real terminal would fight crossterm's raw mode and
+    /// the alternate screen this program already owns. The passphrase goes
+    /// over stdin exactly once per call and reaches neither argv (visible in
+    /// `ps` to every process on the machine) nor the log — `run_stdin`'s own
+    /// contract, the same one `chpasswd` relies on in `in_chroot`.
+    ///
+    /// The mapper name is fixed at `"root"` rather than derived from
+    /// anything: `config::system_toml` writes `root=/dev/mapper/root` and
+    /// `rd.luks.name=<uuid>=root` to match, and a name that could vary would
+    /// be a second place those two have to agree.
+    fn luks_format_and_open(
+        &mut self,
+        ui: &mut Ui,
+        p: &mut Progress,
+        part: &str,
+        passphrase: &str,
+    ) -> Result<(String, Option<String>), Failed> {
+        let mut say = say(ui, p);
+        self.run.run_stdin(
+            "cryptsetup luksFormat",
+            &[
+                "cryptsetup",
+                "luksFormat",
+                "--type",
+                "luks2",
+                "--batch-mode",
+                "--key-file=-",
+                part,
+            ],
+            passphrase,
+            &mut say,
+        )?;
+        // Mirrors `uuid()` below: under `--dry-run` nothing was formatted, so
+        // asking `cryptsetup` for a real answer would just fail differently.
+        let luks_uuid = if self.run.dry_run {
+            format!("dry-run-luks-uuid-for-{}", part.replace('/', "_"))
+        } else {
+            self.run
+                .capture(&["cryptsetup", "luksUUID", part])?
+                .trim()
+                .to_string()
+        };
+        self.run.run_stdin(
+            "cryptsetup open",
+            &["cryptsetup", "open", "--key-file=-", part, "root"],
+            passphrase,
+            &mut say,
+        )?;
+        Ok(("/dev/mapper/root".to_string(), Some(luks_uuid)))
     }
 
     /// vfat for the ESP because UEFI reads nothing else; ext4 for `/boot`

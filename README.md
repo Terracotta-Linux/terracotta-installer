@@ -12,8 +12,8 @@ $ sudo terracotta-installer
 
 | | |
 |---|---|
-| 1 `partition` | GPT: 1G ESP (`ef00`), 1G ext4 `/boot`, the rest ext4 `/` |
-| 2 `format` | `mkfs.fat -F 32`, `mkfs.ext4` twice |
+| 1 `partition` | GPT: 1G ESP (`ef00`), 1G ext4 `/boot`, the rest for `/` — LUKS2 over it first if you asked for encryption, `cryptsetup open`ed to `/dev/mapper/root` |
+| 2 `format` | `mkfs.fat -F 32`, `mkfs.ext4` twice — the second one against `/dev/mapper/root` when encrypted, the raw partition otherwise |
 | 3 `mount` | the target at `/mnt`, then `/mnt/boot`, then `/mnt/boot/efi` |
 | 4 `sysroot` | `kiln sysroot init /mnt` |
 | 5 `configure` | writes `/mnt/etc/kiln/system.toml`, for the build to read |
@@ -48,6 +48,20 @@ root into the deployment's `/etc`, where libostree's three-way merge carries it 
 generation after this one, next to `fstab` and the accounts. Moved, not copied: a second,
 invisible `system.toml` is stale the moment the real one is edited.
 
+**Encryption, when you ask for it, is LUKS2 over `/` and nothing else.** `/boot` and the
+EFI system partition stay in the clear. GRUB's own LUKS support exists but is easy to get
+wrong and unnecessary here: nothing before the kernel needs to read anything encrypted,
+because dracut's `crypt` module unlocks root from `rd.luks.uuid=`/`rd.luks.name=` on the
+kernel cmdline — the same fully-declarative place `root=` already lives — before
+`ostree-prepare-root` ever runs. Step 1 does `cryptsetup luksFormat` and `cryptsetup open`
+against the raw partition before step 2 formats what that opens to; step 5 writes the
+`rd.luks.*` kargs, `dracut_modules = ["crypt"]`, and adds `cryptsetup` to `packages.repo`, all
+three or none, never independently — a config with the kargs and no `cryptsetup` package
+fails during dracut's own module check, and a config with the package and no kargs boots an
+image that cannot find its own root. The passphrase itself follows the same rule as an
+account password: piped to `cryptsetup --key-file=-` over stdin, logged as "N bytes, not
+logged", and never written to `/etc/kiln` — see `config.rs`'s test that asserts exactly that.
+
 ## Running it
 
 It refuses to start unless it is root, booted in UEFI mode, on the network, with a Kiln
@@ -77,11 +91,12 @@ $ cargo test
 One dependency, `crossterm`, for raw mode, the alternate screen and key decoding. Styling is
 hand-written ANSI, the way `kiln` itself writes it.
 
-Three tests check this program's copies against a real Kiln:
+Four tests check this program's copies against a real Kiln:
 
 | | |
 |---|---|
 | `kiln_accepts_what_the_installer_writes` | renders a `system.toml` and runs the real `kiln show` over it — the whole frontend: discovery, parse, include graph, merge, validate, `Manifest`. Catches a renamed key, or `include` ending up after a table header. |
+| `kiln_accepts_the_encrypted_configuration` | the same check over the `rd.luks.*`/`dracut_modules`/`cryptsetup` branch — a plain config passing `kiln show` proves nothing about this one |
 | `every_reference_resolves_against_a_real_library` | every `@kiln/...` this program offers names a file the library actually has |
 | `headings_do_not_outlive_their_groups` | a namespace whose modules all vanished does not render as an empty heading |
 
@@ -92,8 +107,16 @@ them somewhere Kiln is actually installed.
 
 ## What it does not do
 
-No LUKS, no btrfs, no swap partition, no dual-boot, no installing into partitions somebody
-else made. One disk, erased, laid out the one way settled on above. Every one of those is a
-real thing somebody will want and none of them is a thing to add casually — a swap partition
-in particular is the only choice on that list that cannot be undone later, which is why it is
-not offered and `zram-generator` or a swapfile is the answer instead.
+No btrfs, no swap partition, no dual-boot, no installing into partitions somebody else made.
+One disk, erased, laid out the one way settled on above, save for the LUKS2 container that
+one question adds around `/`. Every item on this list is a real thing somebody will want and
+none of them is a thing to add casually — a swap partition in particular is the only choice
+on the *old* version of this list that could not be undone later, which is why it still is not
+offered and `@kiln/system/zram` or `@kiln/system/swapfile` is the answer instead.
+
+LUKS used to be on this list too. It came off because it does not share the property that
+keeps the rest of the list closed: a swap partition, a second filesystem, or a second disk are
+decisions this program would have to make blind, on behalf of a machine it does not know
+anything about yet — encryption is not, since "the whole disk, or none of it" needs nothing
+this installer does not already ask for a plain install, and the answer is the same shape as
+every other yes/no question already on these screens.
