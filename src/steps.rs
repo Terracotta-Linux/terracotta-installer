@@ -521,7 +521,7 @@ impl Installer<'_> {
                             "--target=x86_64-efi",
                             "--efi-directory=/boot/efi",
                             "--boot-directory=/boot",
-                            "--bootloader-id=kiln",
+                            "--bootloader-id=terracotta",
                         ],
                         &mut say,
                     );
