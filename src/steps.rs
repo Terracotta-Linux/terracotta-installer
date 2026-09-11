@@ -189,10 +189,10 @@ impl Installer<'_> {
                 "--change-name=1:EFI system partition",
                 &format!("--new=2:0:+{BOOT_MIB}M"),
                 "--typecode=2:8300",
-                "--change-name=2:kiln-boot",
+                "--change-name=2:terracotta-boot",
                 "--new=3:0:0",
                 "--typecode=3:8300",
-                "--change-name=3:kiln-root",
+                "--change-name=3:terracotta-root",
                 &disk,
             ],
             &mut say,
@@ -227,17 +227,17 @@ impl Installer<'_> {
             let mut say = say(ui, p);
             self.run.run(
                 "mkfs.fat",
-                &["mkfs.fat", "-F", "32", "-n", "KILN-ESP", &l.esp],
+                &["mkfs.fat", "-F", "32", "-n", "TERRACOTTA", &l.esp],
                 &mut say,
             )?;
             self.run.run(
                 "mkfs.ext4 /boot",
-                &["mkfs.ext4", "-F", "-L", "kiln-boot", &l.boot],
+                &["mkfs.ext4", "-F", "-L", "terracotta-boot", &l.boot],
                 &mut say,
             )?;
             self.run.run(
                 "mkfs.ext4 /",
-                &["mkfs.ext4", "-F", "-L", "kiln-root", &l.root],
+                &["mkfs.ext4", "-F", "-L", "terracotta-root", &l.root],
                 &mut say,
             )?;
             self.run
@@ -277,7 +277,7 @@ impl Installer<'_> {
         let mut say = say(ui, p);
         // A desktop running udisks2 auto-mounts a partition the moment it gets
         // a filesystem, so by the time the previous step's `udevadm settle`
-        // returns, `/dev/sda3` can already be at `/run/media/someone/kiln-root`
+        // returns, `/dev/sda3` can already be at `/run/media/someone/terracotta-root`
         // — and then `mount … /mnt` fails on a disk this program formatted
         // itself four seconds ago. Observed, not hypothetical. Best-effort:
         // nothing was mounted in the ordinary case and `umount` says so.
