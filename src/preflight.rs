@@ -81,17 +81,43 @@ pub fn check(module_root: &Path) -> Vec<Problem> {
     // Resolution and package fetching are the two networked stages, and
     // both happen before anything is assembled. A build that gets three minutes
     // in and then cannot reach a mirror is the failure this turns into a
-    // sentence.
+    // sentence. Run *before* the alternate screen is taken, so `nmtui` gets
+    // the real terminal rather than one already in raw mode.
+    if !online() {
+        ensure_online();
+    }
     if !online() {
         out.push(Problem {
             what: "no network".into(),
-            fix: "Kiln resolves packages against real Arch mirrors; connect first \
-                  (`iwctl`, or plug in a cable) and start again"
+            fix: "Kiln resolves packages against real Arch mirrors; connect with \
+                  `nmtui` and start again"
                 .into(),
         });
     }
 
     out
+}
+
+/// If NetworkManager is the one running the machine, give the person one
+/// chance to fix "no network" themselves instead of sending them back to a
+/// shell: run `nmtui` once, inheriting the real terminal (this runs before
+/// the alternate screen is taken). Machines without NetworkManager, or
+/// without `nmtui` on PATH, fall straight through untouched. Deliberately
+/// not a loop — closing `nmtui` without connecting anything has to lead
+/// somewhere, and the ordinary "no network" Problem below is that somewhere.
+fn ensure_online() {
+    if !network_manager_active() || which("nmtui").is_none() {
+        return;
+    }
+    let _ = std::process::Command::new("nmtui").status();
+}
+
+fn network_manager_active() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "NetworkManager"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// A DNS lookup, not a ping: ICMP is filtered on plenty of networks that carry

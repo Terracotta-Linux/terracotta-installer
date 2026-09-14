@@ -28,9 +28,11 @@ mod run;
 mod steps;
 mod tui;
 
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use tui::{Page, Ui, ACCENT, BOLD, DANGER, DIM, OK, RESET, WARN};
+use std::time::{Duration, Instant};
+use tui::{Opt, Page, Ui, ACCENT, BOLD, DANGER, DIM, OK, RESET, WARN};
 
 /// `kiln-config`'s `discover::DEFAULT_MODULE_DIR`. Named again rather than
 /// linked, for the reason the whole program is written this way.
@@ -133,7 +135,9 @@ fn main() -> ExitCode {
         run: &mut runner,
         module_root: module_root.clone(),
     };
+    let started = Instant::now();
     let outcome = installer.install(&mut ui, &mut answers);
+    let elapsed = started.elapsed();
     let log = runner.log_path();
 
     match outcome {
@@ -143,7 +147,12 @@ fn main() -> ExitCode {
             } else {
                 "Installed"
             };
-            let mut done = Page::new((0, 0), title).note(String::new());
+            let mut done = Page::new((0, 0), title)
+                .note(format!(
+                    "{DIM}finished in {}{RESET}",
+                    format_duration(elapsed)
+                ))
+                .note(String::new());
             if dry_run {
                 done = done
                     .note(format!(
@@ -198,40 +207,144 @@ fn main() -> ExitCode {
                 .note(if dry_run {
                     "Run without --dry-run to do it for real.".to_string()
                 } else {
-                    "Remove the installation medium and reboot.".to_string()
+                    "Remove the installation medium, then choose below.".to_string()
                 });
-            let _ = ui.pause_with(&done, "enter · leave the installer");
+
+            if dry_run {
+                let _ = ui.pause_with(&done, "enter · leave the installer");
+                drop(ui);
+                return ExitCode::SUCCESS;
+            }
+
+            let choice = ui.select(
+                &done,
+                &[
+                    Opt::new("Reboot now", "into the system just installed"),
+                    Opt::new("Exit to a shell", "stay on the installation medium"),
+                ],
+            );
             drop(ui);
-            ExitCode::SUCCESS
+            match choice {
+                Ok(0) => reboot(),
+                _ => exit_to_shell(),
+            }
         }
         Err(e) => {
-            drop(ui);
-            eprintln!("\n{DANGER}{BOLD}The install failed.{RESET}\n");
-            eprintln!("  {BOLD}{e}{RESET}\n");
-            for line in e.tail.iter().rev().take(12).rev() {
-                eprintln!("  {DIM}{line}{RESET}");
-            }
-            eprintln!(
-                "\n  Everything that ran is in {BOLD}{}{RESET}.",
-                log.display()
-            );
-            eprintln!(
-                "  {DIM}On a live medium that is tmpfs — copy it somewhere before rebooting.{RESET}"
-            );
-            eprintln!(
-                "\n  {DIM}The disk is in whatever state the failing step left it; running\n  \
-                 terracotta-installer again starts from an erase, which is a clean slate.{RESET}\n"
-            );
+            let summary = |out: &mut Vec<String>| {
+                out.push(format!("{BOLD}{e}{RESET}"));
+                out.push(String::new());
+                for line in e.tail.iter().rev().take(12).rev() {
+                    out.push(format!("{DIM}{line}{RESET}"));
+                }
+                out.push(String::new());
+                out.push(format!(
+                    "Everything that ran is in {BOLD}{}{RESET}.",
+                    log.display()
+                ));
+                out.push(format!(
+                    "{DIM}On a live medium that is tmpfs — copy it somewhere before rebooting.{RESET}"
+                ));
+                out.push(String::new());
+                out.push(format!(
+                    "{DIM}The disk is in whatever state the failing step left it; running{RESET}"
+                ));
+                out.push(format!(
+                    "{DIM}terracotta-installer again starts from an erase, which is a clean slate.{RESET}"
+                ));
+            };
+
             // The same taxonomy as `kiln` itself: 3 is a build failure,
             // 4 is the system refusing. Everything this program can fail at is
             // one of the two, and a script wrapping it should be able to tell
             // them apart.
-            ExitCode::from(if e.what.starts_with("kiln build") {
+            let code = ExitCode::from(if e.what.starts_with("kiln build") {
                 3
             } else {
                 4
-            })
+            });
+
+            if dry_run {
+                drop(ui);
+                eprintln!("\n{DANGER}{BOLD}The install failed.{RESET}\n");
+                let mut lines = Vec::new();
+                summary(&mut lines);
+                for line in lines {
+                    eprintln!("  {line}");
+                }
+                return code;
+            }
+
+            let mut failed = Page::new((0, 0), "The install failed").note(String::new());
+            let mut lines = Vec::new();
+            summary(&mut lines);
+            for line in lines {
+                failed = failed.note(line);
+            }
+            let choice = ui.select(
+                &failed,
+                &[
+                    Opt::new("Reboot", "the disk may be incomplete or unbootable"),
+                    Opt::new("Exit to a shell", "leave the disk exactly as it is"),
+                    Opt::new(
+                        "Unmount and exit to a shell",
+                        "best-effort umount of /mnt first",
+                    ),
+                ],
+            );
+            drop(ui);
+            match choice {
+                Ok(0) => reboot(),
+                Ok(2) => {
+                    unmount_best_effort();
+                    exit_to_shell();
+                }
+                _ => exit_to_shell(),
+            }
         }
+    }
+}
+
+/// Reboot the machine. Best-effort: if neither works, fall through and let
+/// the caller's exit code stand — a machine that cannot reboot itself was
+/// already going to need a hand.
+fn reboot() -> ! {
+    let _ = std::process::Command::new("systemctl")
+        .arg("reboot")
+        .status();
+    let _ = std::process::Command::new("reboot").status();
+    std::process::exit(1);
+}
+
+/// `umount --recursive --lazy /mnt`, errors ignored. Not the precise,
+/// only-what-was-mounted unmount `finish()` does when every step succeeds —
+/// this runs after an arbitrary step failed partway through, so it does not
+/// know what is actually mounted. `--lazy` is what makes that safe to call
+/// unconditionally: a target that was never mounted just says so.
+fn unmount_best_effort() {
+    let _ = std::process::Command::new("umount")
+        .args(["--recursive", "--lazy", steps::MNT])
+        .status();
+}
+
+/// Replace this process with an interactive shell. The installer runs as
+/// tty1's login shell on the live medium (`exec terracotta-installer` in
+/// `.bash_profile`), so an ordinary `exit` here would hand control back to
+/// `agetty`, which would just log in and `exec` the installer again — this
+/// is what actually leaves it, by taking over the process the way it was
+/// taken over.
+fn exit_to_shell() -> ! {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let err = std::process::Command::new(&shell).exec();
+    eprintln!("{DANGER}error{RESET} cannot exec {shell}: {err}");
+    std::process::exit(1);
+}
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
     }
 }
 
