@@ -788,6 +788,20 @@ impl Installer<'_> {
                 .and_then(|()| {
                     self.run
                         .run("bind mount", &["mount", flag, &f, &t], &mut say)
+                })
+                // `/dev`, `/proc`, `/sys` and `/run` are `shared` mounts under
+                // systemd, and an `--rbind` of a shared mount is itself shared —
+                // a member of the *same* propagation peer group as the
+                // original, not an independent copy. Left that way, `leave()`'s
+                // `umount --recursive --lazy` on the copy propagates to the
+                // real mount and can take down the host's own `/dev/pts` (or
+                // worse) along with it — observed, not hypothetical. Making
+                // the copy `rprivate` right after mounting severs that
+                // propagation before anything is stacked on top of it or it is
+                // ever unmounted.
+                .and_then(|()| {
+                    self.run
+                        .run("make private", &["mount", "--make-rprivate", &t], &mut say)
                 });
             if let Err(e) = out {
                 drop(say);
