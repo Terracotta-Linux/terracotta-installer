@@ -189,8 +189,9 @@ fn pairs(line: &str) -> std::collections::BTreeMap<String, String> {
     out
 }
 
-/// Sizes the way a disk's box prints them: powers of two, one decimal.
-pub fn human(bytes: u64) -> String {
+/// Sizes the way a disk's box prints them: powers of two, one decimal, and the
+/// unit against the number in every case — `500B` next to `465.7G`.
+fn human(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut v = bytes as f64;
     let mut u = 0;
@@ -199,7 +200,7 @@ pub fn human(bytes: u64) -> String {
         u += 1;
     }
     if u == 0 {
-        format!("{bytes} B")
+        format!("{bytes}B")
     } else {
         format!("{v:.1}{}", UNITS[u])
     }
@@ -225,6 +226,12 @@ mod tests {
             ..sd
         };
         assert_eq!(nvme.partition(3), "/dev/nvme0n1p3");
+    }
+
+    #[test]
+    fn sizes_carry_their_unit() {
+        assert_eq!(human(500), "500B");
+        assert_eq!(human(4 << 30), "4.0G");
     }
 
     #[test]

@@ -279,7 +279,10 @@ pub const EXTRAS: &[Entry] = &[
 
 /// `@kiln/desktop/gnome` → `<module root>/desktop/gnome.toml`.
 pub fn module_file(root: &Path, reference: &str) -> std::path::PathBuf {
-    let rest = reference.trim_start_matches("@kiln/");
+    // `strip_prefix`, not `trim_start_matches`: the latter strips the prefix
+    // repeatedly, and this is the function that turns a catalog entry into a
+    // path on disk.
+    let rest = reference.strip_prefix("@kiln/").unwrap_or(reference);
     root.join(format!("{rest}.toml"))
 }
 
@@ -314,6 +317,19 @@ pub fn extras(root: &Path) -> Vec<&'static Entry> {
             Entry::Group(_) => matches!(kept.get(i + 1), Some(Entry::Module(_))),
         })
         .map(|(_, e)| *e)
+        .collect()
+}
+
+/// The modules checked when the module screen is first drawn. Reserved for the
+/// ones whose absence would leave the installed system unable to reproduce or
+/// update itself — see `Module::default`.
+pub fn defaults(extras: &[&'static Entry]) -> Vec<String> {
+    extras
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Module(m) if m.default => Some(m.module.to_string()),
+            _ => None,
+        })
         .collect()
 }
 
@@ -355,8 +371,10 @@ pub fn timezones() -> Vec<String> {
         let name = area.file_name().to_string_lossy().into_owned();
         // The tzdata tree also holds `posix/`, `right/`, `zone.tab` and the
         // legacy single-word zones; only the `Area/City` directories are the
-        // names `timedatectl` and `systemd-firstboot` accept.
-        if !area.path().is_dir() || matches!(name.as_str(), "posix" | "right" | "SystemV") {
+        // names `timedatectl` and `systemd-firstboot` accept. The leading
+        // capital rules out `posix/` and `right/`; `SystemV` is the one
+        // directory that looks like an area and is not.
+        if !area.path().is_dir() || name == "SystemV" {
             continue;
         }
         if !name.chars().next().is_some_and(char::is_uppercase) {

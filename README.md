@@ -17,8 +17,8 @@ $ sudo terracotta-installer
 | 3 `mount` | the target at `/mnt`, then `/mnt/boot`, then `/mnt/boot/efi` |
 | 4 `sysroot` | `kiln sysroot init /mnt` |
 | 5 `configure` | writes `/mnt/etc/kiln/system.toml`, for the build to read |
-| 6 `build` | `kiln build --sysroot /mnt --config /mnt/etc/kiln` |
-| 7 `deploy` | `kiln deploy --sysroot /mnt 1` — `build` commits, it does not deploy |
+| 6 `build` | `kiln --sysroot /mnt --config /mnt/etc/kiln build` — plus `--module-root` when it is not the default |
+| 7 `deploy` | `kiln --sysroot /mnt deploy 1` — `build` commits, it does not deploy |
 | 8 `etc` | `/etc/fstab` in the deployment, and `/etc/kiln` moved into it |
 | 9 `bootloader` | `grub-install` and `grub-mkconfig`, chrooted into the deployment |
 | 10 `accounts` | hostname, timezone, the first user, passwords |
@@ -74,7 +74,9 @@ $ sudo terracotta-installer --help
 ```
 
 `--dry-run` still runs `lsblk`, `blkid` and `localectl`, because the plan is wrong without
-their answers, and runs nothing else. Everything that happens is appended to
+their answers, and runs nothing else — including `nmtui`, which an ordinary run offers when
+the machine is offline. It needs a Kiln module library all the same: the interview has no
+questions to ask without one. Everything that happens is appended to
 `/var/log/terracotta-installer.log`, which on a live medium is tmpfs — copy it somewhere
 before rebooting if the install failed.
 
@@ -91,7 +93,7 @@ $ cargo test
 One dependency, `crossterm`, for raw mode, the alternate screen and key decoding. Styling is
 hand-written ANSI, the way `kiln` itself writes it.
 
-Four tests check this program's copies against a real Kiln:
+Five tests check this program's copies against a real Kiln:
 
 | | |
 |---|---|
@@ -99,6 +101,7 @@ Four tests check this program's copies against a real Kiln:
 | `kiln_accepts_the_encrypted_configuration` | the same check over the `rd.luks.*`/`dracut_modules`/`cryptsetup` branch — a plain config passing `kiln show` proves nothing about this one |
 | `every_reference_resolves_against_a_real_library` | every `@kiln/...` this program offers names a file the library actually has |
 | `headings_do_not_outlive_their_groups` | a namespace whose modules all vanished does not render as an empty heading |
+| `sudo_matches_what_the_profiles_actually_include` | the installer's own idea of which profiles grant `wheel` sudo — which is what lets the root password be left empty — matches the profiles' include graphs |
 
 They look for Kiln in three places, in this order: `KILN_MODULE_DIR`, the installed package
 at `/usr/share/kiln/modules` plus `kiln` on `PATH`, and a sibling `../kiln` checkout. They

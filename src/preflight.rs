@@ -13,10 +13,13 @@ pub struct Problem {
     pub fix: String,
 }
 
-/// Programs the installer itself runs. Not `grub-install`, `grub-mkconfig`,
-/// `useradd` or `systemd-firstboot`: those run *chrooted into the deployment*,
-/// so the copies that matter are the image's, and they arrive with the packages
-/// `@kiln/boot/grub2` and `@kiln/profiles/*` install.
+/// Programs the installer itself runs on **every** install. Not `grub-install`,
+/// `grub-mkconfig`, `useradd` or `systemd-firstboot`: those run *chrooted into
+/// the deployment*, so the copies that matter are the image's, and they arrive
+/// with the packages `@kiln/boot/grub2` and `@kiln/profiles/*` install. Not
+/// `cryptsetup` either — it is reached only from the encryption branch, so a
+/// hard block here would refuse a machine that would have installed fine;
+/// `interview::encrypt_screen` asks for it at the point it becomes required.
 const NEEDED: &[(&str, &str)] = &[
     ("kiln", "pacman -S kiln"),
     ("sgdisk", "pacman -S gptfdisk"),
@@ -30,10 +33,9 @@ const NEEDED: &[(&str, &str)] = &[
     ("partprobe", "pacman -S parted"),
     ("udevadm", "pacman -S systemd"),
     ("wipefs", "pacman -S util-linux"),
-    ("cryptsetup", "pacman -S cryptsetup"),
 ];
 
-pub fn check(module_root: &Path) -> Vec<Problem> {
+pub fn check(module_root: &Path, dry_run: bool) -> Vec<Problem> {
     let mut out = Vec::new();
 
     // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
@@ -81,9 +83,12 @@ pub fn check(module_root: &Path) -> Vec<Problem> {
     // Resolution and package fetching are the two networked stages, and
     // both happen before anything is assembled. A build that gets three minutes
     // in and then cannot reach a mirror is the failure this turns into a
-    // sentence. Run *before* the alternate screen is taken, so `nmtui` gets
-    // the real terminal rather than one already in raw mode.
-    if !online() {
+    // sentence. `ensure_online` runs *before* the alternate screen is taken, so
+    // `nmtui` gets the real terminal rather than one already in raw mode — and
+    // not at all under `--dry-run`, which promises to ask everything and write
+    // nothing: `nmtui` writes NetworkManager connection profiles, so offering
+    // it would put a dry run outside that promise.
+    if !online() && !dry_run {
         ensure_online();
     }
     if !online() {

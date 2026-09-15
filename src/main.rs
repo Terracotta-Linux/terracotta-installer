@@ -15,8 +15,9 @@
 //! The shape:
 //!
 //! ```text
-//! preflight → interview → review → eleven steps → reboot
-//!             (nothing is written before the review screen is accepted)
+//! preflight → interview → eleven steps → reboot
+//!             (the last screen of the interview is the review, and nothing
+//!              is written before it is accepted)
 //! ```
 
 mod block;
@@ -85,7 +86,7 @@ fn main() -> ExitCode {
 
     // Before the screen is taken, so a preflight failure is a message in the
     // scrollback rather than one that vanishes with the alternate screen.
-    let problems = preflight::check(&module_root);
+    let problems = preflight::check(&module_root, dry_run);
     if !problems.is_empty() && !dry_run {
         eprintln!("\n{BOLD}terracotta-installer cannot start.{RESET}\n");
         for p in &problems {
@@ -115,7 +116,7 @@ fn main() -> ExitCode {
         Err(e) => return die(&e),
     };
 
-    let answers = match interview::ask(&mut ui, &mut runner, &module_root) {
+    let mut answers = match interview::ask(&mut ui, &mut runner, &module_root) {
         Ok(Some(a)) => a,
         // Ctrl-C before the review screen. Nothing was written, so there is
         // nothing to say beyond that.
@@ -130,7 +131,6 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut answers = answers;
     let mut installer = steps::Installer {
         run: &mut runner,
         module_root: module_root.clone(),
@@ -210,14 +210,17 @@ fn main() -> ExitCode {
                     "Remove the installation medium, then choose below.".to_string()
                 });
 
+            // The last screen: there is no screen to go back to, and Esc here
+            // would leave the installer rather than return anywhere, so neither
+            // legend offers it.
             if dry_run {
-                let _ = ui.pause_with(&done, "enter · leave the installer");
+                let _ = ui.pause(&done.help("enter · leave the installer"));
                 drop(ui);
                 return ExitCode::SUCCESS;
             }
 
             let choice = ui.select(
-                &done,
+                &done.help("↑↓ move · enter select"),
                 &[
                     Opt::new("Reboot now", "into the system just installed"),
                     Opt::new("Exit to a shell", "stay on the installation medium"),
@@ -233,17 +236,29 @@ fn main() -> ExitCode {
             let summary = |out: &mut Vec<String>| {
                 out.push(format!("{BOLD}{e}{RESET}"));
                 out.push(String::new());
-                for line in e.tail.iter().rev().take(12).rev() {
+                for line in &e.tail {
                     out.push(format!("{DIM}{line}{RESET}"));
                 }
                 out.push(String::new());
-                out.push(format!(
-                    "Everything that ran is in {BOLD}{}{RESET}.",
-                    log.display()
-                ));
-                out.push(format!(
-                    "{DIM}On a live medium that is tmpfs — copy it somewhere before rebooting.{RESET}"
-                ));
+                // The log is the only artefact a failed install leaves, so
+                // pointing at one that was never opened is the worst possible
+                // moment to be wrong about a path.
+                match &log {
+                    Some(at) => {
+                        out.push(format!(
+                            "Everything that ran is in {BOLD}{}{RESET}.",
+                            at.display()
+                        ));
+                        out.push(format!(
+                            "{DIM}On a live medium that is tmpfs — copy it somewhere before \
+                             rebooting.{RESET}"
+                        ));
+                    }
+                    None => out.push(format!(
+                        "{WARN}Nothing was logged: {} could not be opened for writing.{RESET}",
+                        run::LOG
+                    )),
+                }
                 out.push(String::new());
                 out.push(format!(
                     "{DIM}The disk is in whatever state the failing step left it; running{RESET}"
@@ -257,7 +272,7 @@ fn main() -> ExitCode {
             // 4 is the system refusing. Everything this program can fail at is
             // one of the two, and a script wrapping it should be able to tell
             // them apart.
-            let code = ExitCode::from(if e.what.starts_with("kiln build") {
+            let code = ExitCode::from(if e.what.starts_with(steps::KILN_BUILD) {
                 3
             } else {
                 4
@@ -281,7 +296,7 @@ fn main() -> ExitCode {
                 failed = failed.note(line);
             }
             let choice = ui.select(
-                &failed,
+                &failed.help("↑↓ move · enter select"),
                 &[
                     Opt::new("Reboot", "the disk may be incomplete or unbootable"),
                     Opt::new("Exit to a shell", "leave the disk exactly as it is"),
@@ -295,7 +310,7 @@ fn main() -> ExitCode {
             match choice {
                 Ok(0) => reboot(),
                 Ok(2) => {
-                    unmount_best_effort();
+                    unmount_best_effort(answers.encrypt);
                     exit_to_shell();
                 }
                 _ => exit_to_shell(),
@@ -320,10 +335,20 @@ fn reboot() -> ! {
 /// this runs after an arbitrary step failed partway through, so it does not
 /// know what is actually mounted. `--lazy` is what makes that safe to call
 /// unconditionally: a target that was never mounted just says so.
-fn unmount_best_effort() {
+///
+/// The LUKS mapping goes with it, for the reason `finish()` closes it too: the
+/// failure screen offers a second run as a clean slate, and a container left
+/// open under a fixed name is what stops that second run from erasing the disk
+/// it just failed on.
+fn unmount_best_effort(encrypted: bool) {
     let _ = std::process::Command::new("umount")
         .args(["--recursive", "--lazy", steps::MNT])
         .status();
+    if encrypted {
+        let _ = std::process::Command::new("cryptsetup")
+            .args(["close", steps::LUKS_NAME])
+            .status();
+    }
 }
 
 /// Replace this process with an interactive shell. The installer runs as

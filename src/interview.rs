@@ -50,16 +50,28 @@ pub struct Answers {
 }
 
 impl Answers {
-    /// Whether an unlocked root account is optional. Kiln does not manage
-    /// accounts, so this is the installer reasoning about the configuration it
-    /// is about to write — not Kiln reasoning about users.
+    /// Whether an unlocked root account is optional.
     fn sudo(&self) -> bool {
-        self.profile != "@kiln/profiles/minimal"
-            || self
-                .modules
-                .iter()
-                .any(|m| m == "@kiln/security/wheel-sudo")
+        grants_sudo(&self.profile, &self.modules)
     }
+}
+
+/// The module every profile but `minimal` already includes, and the one a
+/// `minimal` install has to be told to add.
+const WHEEL_SUDO: &str = "@kiln/security/wheel-sudo";
+
+/// Whether the configuration about to be written lets `wheel` sudo, and so
+/// whether root may be left locked.
+///
+/// Kiln does not manage accounts, so this is the installer reasoning about the
+/// configuration it is about to write rather than Kiln reasoning about users —
+/// which makes it a *third* copy of what the module library says, after
+/// `catalog.rs` and `config.rs`. A profile that quietly dropped `wheel-sudo`
+/// would have the root-password screen call itself "Optional" and hand
+/// somebody a machine with no root password and no sudo, so the copy is
+/// checked against a real library in this module's tests.
+fn grants_sudo(profile: &str, modules: &[String]) -> bool {
+    profile != "@kiln/profiles/minimal" || modules.iter().any(|m| m == WHEEL_SUDO)
 }
 
 const SCREENS: usize = 14;
@@ -97,7 +109,11 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
         locale: locales[0].clone(),
         keymap: maps[0].clone(),
         profile: profiles[0].module.into(),
-        modules: Vec::new(),
+        // The defaults live in `a` from the start rather than being rebuilt by
+        // `modules_screen` every time it is drawn: that screen pre-checks from
+        // `a.modules`, so a fresh copy of the defaults there would silently
+        // discard everything chosen the first time round on the way back.
+        modules: catalog::defaults(&extras),
         packages: Vec::new(),
         username: String::new(),
         user_password: String::new(),
@@ -164,9 +180,12 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
 type Screen = Result<(), Nav>;
 
 fn disk_screen(ui: &mut Ui, step: (usize, usize), disks: &[Disk], a: &mut Answers) -> Screen {
+    // The first screen, and the one place Esc has nowhere to go back to, so
+    // the legend does not offer it.
     let page = Page::new(step, "Which disk should Kiln be installed on?")
         .note("Everything on the disk you choose is erased. Disks holding a mounted")
-        .note("filesystem — the medium you booted from, most likely — cannot be chosen.");
+        .note("filesystem — the medium you booted from, most likely — cannot be chosen.")
+        .help("↑↓ move · type to filter · enter select · ctrl-c quit");
     let options: Vec<Opt> = disks
         .iter()
         .map(|d| {
@@ -186,10 +205,10 @@ fn disk_screen(ui: &mut Ui, step: (usize, usize), disks: &[Disk], a: &mut Answer
                 None => format!("{} · {model} · {kind}", d.size()),
             };
             let opt = Opt::new(d.path.clone(), note);
-            if d.busy.is_some() {
-                opt.disabled()
-            } else {
-                opt
+            match (&d.busy, d.path == a.disk.path) {
+                (Some(_), _) => opt.disabled(),
+                (None, true) => opt.checked(),
+                (None, false) => opt,
             }
         })
         .collect();
@@ -228,7 +247,7 @@ fn confirm_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
         .note(format!(
             "{DANGER}The partition table and every filesystem on this disk are destroyed.{RESET}"
         ))
-        .note("There is no undo, and nothing else on the machine is touched.".to_string())
+        .note("There is no undo, and nothing else on the machine is touched.")
         .note(String::new())
         .note(format!("Kiln will lay it out as {DIM}follows{RESET}:"))
         .note(format!(
@@ -254,18 +273,38 @@ fn encrypt_screen(ui: &mut Ui, step: (usize, usize), a: &mut Answers) -> Screen 
         .note("in the clear — GRUB never needs to unlock anything, the initramfs does")
         .note("that at boot from a passphrase you type there, not from this one.");
     loop {
-        let options = vec![
-            Opt::new("No", "root is written in the clear"),
-            Opt::new(
-                "Yes",
-                "cryptsetup luksFormat; unlocked at every boot with a passphrase",
-            ),
-        ];
+        let no = Opt::new("No", "root is written in the clear");
+        let yes = Opt::new(
+            "Yes",
+            "cryptsetup luksFormat; unlocked at every boot with a passphrase",
+        );
+        let options = if a.encrypt {
+            vec![no, yes.checked()]
+        } else {
+            vec![no.checked(), yes]
+        };
         let i = ui.select(&page, &options)?;
         a.encrypt = i == 1;
         if !a.encrypt {
             a.passphrase.clear();
             return Ok(());
+        }
+        // Asked here rather than in `preflight`, which has no warning channel:
+        // a missing `cryptsetup` cannot fail an unencrypted install, and a hard
+        // block at startup would refuse a machine that would have installed
+        // fine.
+        if crate::preflight::which("cryptsetup").is_none() {
+            let missing = Page::new(step, "Encrypt the disk?")
+                .note(format!(
+                    "{DANGER}`cryptsetup` is not on PATH, so nothing on this medium can{RESET}"
+                ))
+                .note(format!("{DANGER}create a LUKS2 container.{RESET}"))
+                .note(String::new())
+                .note("Install it with `pacman -S cryptsetup` and start the installer")
+                .note("again, or continue without encryption.")
+                .help("enter back to the question · ctrl-c quit");
+            ui.pause(&missing)?;
+            continue;
         }
         match ui.secret(&page, "passphrase", false) {
             Ok(p) => {
@@ -307,7 +346,17 @@ fn pick(
     let page = Page::new(step, title)
         .note(note)
         .note("Start typing to filter.");
-    let options: Vec<Opt> = from.iter().map(|s| Opt::new(s.clone(), "")).collect();
+    let options: Vec<Opt> = from
+        .iter()
+        .map(|s| {
+            let opt = Opt::new(s.clone(), "");
+            if *s == *into {
+                opt.checked()
+            } else {
+                opt
+            }
+        })
+        .collect();
     let i = ui.select(&page, &options)?;
     *into = from[i].clone();
     Ok(())
@@ -323,7 +372,17 @@ fn profile_screen(
         .note("A profile is one line of `include` and the packages nobody has an")
         .note("opinion about. It also picks the kernel — two kernel modules are a")
         .note("conflict by design, so this is where that choice is made.");
-    let options: Vec<Opt> = profiles.iter().map(|p| Opt::new(p.label, p.note)).collect();
+    let options: Vec<Opt> = profiles
+        .iter()
+        .map(|p| {
+            let opt = Opt::new(p.label, p.note);
+            if p.module == a.profile {
+                opt.checked()
+            } else {
+                opt
+            }
+        })
+        .collect();
     let i = ui.select(&page, &options)?;
     a.profile = profiles[i].module.into();
     Ok(())
@@ -345,7 +404,7 @@ fn modules_screen(
             Entry::Group(g) => Opt::heading(*g),
             Entry::Module(m) => {
                 let opt = Opt::new(m.label, m.note);
-                if m.default {
+                if a.modules.iter().any(|chosen| chosen == m.module) {
                     opt.checked()
                 } else {
                     opt
@@ -369,6 +428,10 @@ fn packages_screen(ui: &mut Ui, step: (usize, usize), a: &mut Answers) -> Screen
         .note("Space-separated Arch package names — `neovim git firefox`. Leave it")
         .note("empty if you would rather add them later; `kiln apply` is the same")
         .note("command either way.");
+    // The character set is closed, and `config.rs` depends on it being closed:
+    // package names are interpolated straight into TOML string literals with no
+    // escaping, which is only safe while nothing here can produce a quote or a
+    // backslash.
     let typed = ui.text(&page, "packages", &a.packages.join(" "), |s| {
         match s.split_whitespace().find(|p| {
             !p.chars()
@@ -410,8 +473,8 @@ fn username_screen(ui: &mut Ui, step: (usize, usize), a: &mut Answers) -> Screen
 
 fn password_screen(ui: &mut Ui, step: (usize, usize), a: &mut Answers) -> Screen {
     let page = Page::new(step, format!("A password for {}", a.username))
-        .note("Typed twice. Nothing is echoed, and it never reaches the image or".to_string())
-        .note("the log — it is piped to `chpasswd` inside the deployment.".to_string());
+        .note("Typed twice. Nothing is echoed, and it never reaches the image or")
+        .note("the log — it is piped to `chpasswd` inside the deployment.");
     a.user_password = ui.secret(&page, "password", false)?;
     Ok(())
 }
@@ -443,7 +506,7 @@ fn review_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
     } else {
         a.modules
             .iter()
-            .map(|m| m.trim_start_matches("@kiln/"))
+            .map(|m| short(m))
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -475,10 +538,7 @@ fn review_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
             "locale".into(),
             format!("{}  ·  keymap {}", a.locale, a.keymap),
         ),
-        (
-            "profile".into(),
-            a.profile.trim_start_matches("@kiln/").to_string(),
-        ),
+        ("profile".into(), short(&a.profile).to_string()),
         ("modules".into(), modules),
         ("packages".into(), packages),
         ("user".into(), format!("{} (wheel)", a.username)),
@@ -491,6 +551,78 @@ fn review_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
             },
         ),
     ];
-    ui.review(&page, &rows)?;
-    Ok(())
+    ui.review(&page, &rows)
+}
+
+/// `@kiln/gpu/amd` → `gpu/amd`, for a screen with a column to spare rather than
+/// a namespace to prove. Not `trim_start_matches`, which strips the prefix
+/// repeatedly.
+fn short(reference: &str) -> &str {
+    reference.strip_prefix("@kiln/").unwrap_or(reference)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{module_file, probe, PROFILES};
+
+    /// Every `@kiln/...` reference a module file names, following `include`
+    /// through the whole graph. A superset of the include list — any other
+    /// array holding a module reference is counted too — which is the safe
+    /// direction for the check below.
+    fn reaches(root: &Path, reference: &str, seen: &mut Vec<String>) -> bool {
+        if reference == WHEEL_SUDO {
+            return true;
+        }
+        if seen.iter().any(|s| s == reference) {
+            return false;
+        }
+        seen.push(reference.to_string());
+        let Ok(text) = std::fs::read_to_string(module_file(root, reference)) else {
+            return false;
+        };
+        // Odd segments of a split on `"` are the quoted strings; comments
+        // mentioning a module in prose are not among them.
+        let refs: Vec<String> = text
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| s.starts_with("@kiln/"))
+            .map(str::to_string)
+            .collect();
+        refs.iter().any(|r| reaches(root, r, seen))
+    }
+
+    /// `grants_sudo` is a copy of what Kiln's library says, in a repository
+    /// that releases separately from it. If a profile ever drops `wheel-sudo`,
+    /// this is what stops the root-password screen from calling itself
+    /// "Optional" on a machine that would then have neither root nor sudo.
+    #[test]
+    fn sudo_matches_what_the_profiles_actually_include() {
+        let Some(root) = probe::module_root() else {
+            eprintln!("skipping: no Kiln module library to read");
+            return;
+        };
+        for p in PROFILES {
+            if !module_file(&root, p.module).is_file() {
+                continue;
+            }
+            let real = reaches(&root, p.module, &mut Vec::new());
+            assert_eq!(
+                grants_sudo(p.module, &[]),
+                real,
+                "{} {} `{WHEEL_SUDO}`, and the installer thinks otherwise",
+                p.module,
+                if real { "includes" } else { "does not include" }
+            );
+        }
+    }
+
+    /// The other half: a `minimal` install that picks the module by hand.
+    #[test]
+    fn choosing_wheel_sudo_unlocks_the_optional_root_password() {
+        let minimal = "@kiln/profiles/minimal";
+        assert!(!grants_sudo(minimal, &[]));
+        assert!(grants_sudo(minimal, &[WHEEL_SUDO.to_string()]));
+    }
 }

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```console
 $ cargo build                       # debug
 $ cargo build --release
-$ cargo test                        # 27 tests, none of which touch a disk
+$ cargo test                        # 31 tests, none of which touch a disk
 $ cargo test the_bootloader_comes_after_the_deploy       # one test by name
 $ cargo test config::tests -- --nocapture                # one module, with output
 $ cargo fmt && cargo clippy --all-targets                # both are expected to be clean
@@ -18,8 +18,11 @@ only way to exercise the TUI without a disk. It cannot be driven non-interactive
 interview needs a real terminal (crossterm raw mode, minimum 60x18) — so verify screen
 changes by running it yourself, not by piping.
 
-`--dry-run` skips preflight's hard blocks (root, UEFI, network, module library) with a
-warning, so it works from a normal desktop.
+`--dry-run` skips preflight's hard blocks (root, UEFI, network, tools) with a warning, so it
+works from a normal desktop, and it does not offer `nmtui` when the machine is offline. A
+module library is the one thing it still needs: `interview::ask` has no profiles to offer
+without one and fails with a message of its own. Point `--module-root` (or `KILN_MODULE_DIR`)
+at a Kiln checkout's `./modules` on a machine where the package is not installed.
 
 ## The seam this program is written against
 
@@ -35,12 +38,15 @@ rules follow, and breaking any of them breaks that arrangement:
   the dependency never runs the other way.
 
 Because the two repositories can drift silently, this crate carries a *copy* of Kiln's
-module names (`catalog.rs`) and of what a `system.toml` looks like (`config.rs`), and three
-tests check those copies against a real Kiln: `kiln_accepts_what_the_installer_writes`
-(runs the real `kiln show` over a rendered config), `every_reference_resolves_against_a_real_library`,
-`headings_do_not_outlive_their_groups`. They find Kiln via `catalog::probe`, in order:
-`KILN_MODULE_DIR`, the installed `/usr/share/kiln/modules` plus `kiln` on `PATH`, then a
-sibling `../kiln` checkout. They skip with a message when none is present.
+module names (`catalog.rs`) and of what a `system.toml` looks like (`config.rs`), and five
+tests check those copies against a real Kiln: `kiln_accepts_what_the_installer_writes` and
+`kiln_accepts_the_encrypted_configuration` (run the real `kiln show` over a rendered config),
+`every_reference_resolves_against_a_real_library`, `headings_do_not_outlive_their_groups`, and
+`sudo_matches_what_the_profiles_actually_include` (whether a profile grants `wheel` sudo,
+which is what decides that the root password may be left empty). They find Kiln via
+`catalog::probe`, in order: `KILN_MODULE_DIR`, the installed `/usr/share/kiln/modules` plus
+`kiln` on `PATH`, then a sibling `../kiln` checkout. They skip with a message when none is
+present.
 
 ## Architecture
 
@@ -82,8 +88,10 @@ every later generation. The configuration is *staged* at `/mnt/etc/kiln` for `ki
 
 ### Things that bite
 
-- **`run::read_only`** is the allowlist of commands that still execute under `--dry-run`.
-  Adding a command that writes to that list turns a dry run into one that partitions a disk.
+- **`run::read_only`** is the allowlist of commands that still execute under `--dry-run`, and
+  both `Runner::exec` and `Runner::capture` consult it — `capture` refuses anything else
+  rather than spawning it. Adding a command that writes to that list turns a dry run into one
+  that partitions a disk.
 - **`grub-install` and `grub-mkconfig` run chrooted into the deployment**, so the copies that
   matter are the *image's*, not the live medium's — including `efibootmgr`, which
   `grub-install` executes to write the NVRAM entry and `@kiln/boot/grub2` installs alongside
@@ -96,4 +104,5 @@ every later generation. The configuration is *staged* at `/mnt/etc/kiln` for `ki
   already-deployed generation takes `set_default`, which disarms the boot counter on
   purpose.
 - **Exit codes follow `kiln`'s own taxonomy**: 3 is a build failure, 4 is the system
-  refusing.
+  refusing. `main.rs` tells them apart by matching `Failed::what` against `steps::KILN_BUILD`,
+  which is why that step's label is a named constant rather than a string literal.

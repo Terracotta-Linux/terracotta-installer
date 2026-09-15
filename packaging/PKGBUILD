@@ -12,7 +12,7 @@ pkgdesc="An interactive installer for Terracotta Linux."
 arch=('x86_64')
 url="https://github.com/Terracotta-Linux/terracotta-installer"
 license=('MIT')
-depends=('terracotta-kiln' 'gptfdisk' 'e2fsprogs' 'dosfstools' 'util-linux' 'coreutils' 'parted' 'systemd')
+depends=('terracotta-kiln' 'gptfdisk' 'e2fsprogs' 'dosfstools' 'util-linux' 'coreutils' 'parted' 'systemd' 'cryptsetup')
 makedepends=('cargo' 'git')
 options=('!lto')
 source=("$pkgname-$pkgver::git+https://github.com/Terracotta-Linux/terracotta-installer.git#tag=v$pkgver")

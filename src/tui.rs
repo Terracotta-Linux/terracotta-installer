@@ -53,6 +53,13 @@ pub struct Page {
     pub step: (usize, usize),
     pub title: String,
     pub note: Vec<String>,
+    /// A key legend of this screen's own, replacing the widget's default.
+    ///
+    /// The first screen has no "esc back" to offer and the last one has
+    /// neither, and a footer that promises a key nothing is listening for is a
+    /// footer people stop reading. It lives on `Page` rather than in every
+    /// widget's signature because the screen, not the widget, is what knows.
+    pub help: Option<String>,
 }
 
 impl Page {
@@ -61,11 +68,17 @@ impl Page {
             step,
             title: title.into(),
             note: Vec::new(),
+            help: None,
         }
     }
 
     pub fn note(mut self, line: impl Into<String>) -> Page {
         self.note.push(line.into());
+        self
+    }
+
+    pub fn help(mut self, legend: impl Into<String>) -> Page {
+        self.help = Some(legend.into());
         self
     }
 }
@@ -164,15 +177,21 @@ impl Ui {
     }
 
     /// Paint a whole screen. Lines already carry their own escapes.
+    ///
+    /// Each row is cleared as it is rewritten rather than blanking the screen
+    /// first: `run.rs` calls this once per line of output and `kiln build`
+    /// produces thousands, so a `Clear(All)` here is thousands of visible
+    /// blank frames on a real console.
     fn paint(&mut self, lines: &[String]) {
-        let _ = queue!(
-            self.out,
-            terminal::Clear(terminal::ClearType::All),
-            cursor::MoveTo(0, 0)
-        );
+        let _ = queue!(self.out, cursor::MoveTo(0, 0));
         for line in lines.iter().take(self.rows as usize) {
+            let _ = queue!(self.out, terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = write!(self.out, "{line}\r\n");
         }
+        let _ = queue!(
+            self.out,
+            terminal::Clear(terminal::ClearType::FromCursorDown)
+        );
         let _ = self.out.flush();
     }
 
@@ -213,9 +232,11 @@ impl Ui {
         out.push(String::new());
     }
 
-    fn footer(&self, help: &str, out: &mut Vec<String>) {
-        // Pinned to the bottom, so the key legend does not move as a list
-        // filters down to two entries.
+    /// The key legend, pinned to the bottom so it does not move as a list
+    /// filters down to two entries. `default` is the widget's legend; a `Page`
+    /// that set its own replaces it.
+    fn footer(&self, page: &Page, default: &str, out: &mut Vec<String>) {
+        let help = page.help.as_deref().unwrap_or(default);
         while out.len() + 2 < self.rows as usize {
             out.push(String::new());
         }
@@ -224,10 +245,18 @@ impl Ui {
 
     /// Pick one. Typing filters, which is what makes six hundred timezones a
     /// usable question rather than a scrolling exercise.
+    ///
+    /// The cursor opens on the first `checked` row, which is how Esc back into
+    /// a list lands on the answer that list already has rather than on whatever
+    /// sorts first.
     pub fn select(&mut self, page: &Page, options: &[Opt]) -> Answer<usize> {
         let width = column(options);
         let mut filter = String::new();
-        let mut cursor = 0usize;
+        let mut cursor = options
+            .iter()
+            .filter(|o| !o.heading && o.enabled)
+            .position(|o| o.checked)
+            .unwrap_or(0);
         let mut top = 0usize;
         loop {
             let shown: Vec<usize> = (0..options.len())
@@ -240,13 +269,17 @@ impl Ui {
                             .contains(&filter.to_lowercase())
                 })
                 .collect();
-            // A heading whose whole group filtered away is noise.
+            // A heading whose whole group filtered away is noise. The rule is
+            // "the next row is not another heading", the same one
+            // `catalog::extras` applies to the list before it ever gets here —
+            // asking instead whether *any* later row is a module keeps every
+            // empty heading above the last surviving group.
             let shown: Vec<usize> = shown
                 .iter()
                 .copied()
                 .enumerate()
                 .filter(|&(pos, i)| {
-                    !options[i].heading || shown[pos + 1..].iter().any(|&j| !options[j].heading)
+                    !options[i].heading || shown.get(pos + 1).is_some_and(|&j| !options[j].heading)
                 })
                 .map(|(_, i)| i)
                 .collect();
@@ -296,6 +329,7 @@ impl Ui {
             }
 
             self.footer(
+                page,
                 "↑↓ move · type to filter · enter select · esc back · ctrl-c quit",
                 &mut lines,
             );
@@ -345,12 +379,18 @@ impl Ui {
             let mut lines = Vec::new();
             self.header(page, &mut lines);
             let room = (self.rows as usize).saturating_sub(lines.len() + 3).max(3);
-            let here = selectable.get(cursor).copied().unwrap_or(0);
-            if here < top {
-                top = here;
-            }
-            if here >= top + room {
-                top = here + 1 - room;
+            // `None` when there is nothing to check — a module library whose
+            // namespaces were all filtered away. Nothing is highlighted and
+            // space toggles nothing, rather than indexing row zero of an empty
+            // list.
+            let here = selectable.get(cursor).copied();
+            if let Some(here) = here {
+                if here < top {
+                    top = here;
+                }
+                if here >= top + room {
+                    top = here + 1 - room;
+                }
             }
             top = top.min(options.len().saturating_sub(room));
 
@@ -364,7 +404,7 @@ impl Ui {
                 } else {
                     format!("{DIM}[ ]{RESET}")
                 };
-                let sel = i == here;
+                let sel = here == Some(i);
                 let arrow = if sel {
                     format!("{ACCENT}▸{RESET}")
                 } else {
@@ -394,6 +434,7 @@ impl Ui {
                 ));
             }
             self.footer(
+                page,
                 "↑↓ move · space toggle · enter continue · esc back · ctrl-c quit",
                 &mut lines,
             );
@@ -402,7 +443,11 @@ impl Ui {
             match self.key()? {
                 Key::Up => cursor = cursor.saturating_sub(1),
                 Key::Down => cursor = (cursor + 1).min(selectable.len().saturating_sub(1)),
-                Key::Space => chosen[here] = !chosen[here],
+                Key::Space => {
+                    if let Some(here) = here {
+                        chosen[here] = !chosen[here];
+                    }
+                }
                 Key::Enter => {
                     return Ok((0..options.len()).filter(|&i| chosen[i]).collect());
                 }
@@ -431,7 +476,7 @@ impl Ui {
             let first = self.field(page, label, "", true, move |s: &str| {
                 if s.is_empty() && !allow_empty {
                     Err("a password is required".into())
-                } else if !s.is_empty() && s.len() < 6 {
+                } else if !s.is_empty() && s.chars().count() < 6 {
                     Err("at least six characters".into())
                 } else {
                     Ok(())
@@ -469,12 +514,19 @@ impl Ui {
                 value.clone()
             };
             lines.push(format!("{PAD}{label}"));
+            // Truncated to the terminal: a value that wraps costs a row
+            // `paint()` has not budgeted for, which pushes the footer off the
+            // screen. The tail is what matters while typing, so the *front* is
+            // what goes.
+            let room = (self.cols as usize).saturating_sub(PAD.len() + 4);
+            let shown = tail_of(&shown, room);
             lines.push(format!("{PAD}{ACCENT}▸{RESET} {shown}{ACCENT}▏{RESET}"));
             if let Some(e) = &error {
                 lines.push(String::new());
                 lines.push(format!("{PAD}{DANGER}{e}{RESET}"));
             }
             self.footer(
+                page,
                 "enter continue · ctrl-u clear · esc back · ctrl-c quit",
                 &mut lines,
             );
@@ -529,7 +581,9 @@ impl Ui {
     }
 
     /// The review screen: everything that was answered, and the last chance.
-    pub fn review(&mut self, page: &Page, rows: &[(String, String)]) -> Answer<bool> {
+    /// Returning is consent — Esc and Ctrl-C are the other two answers, and
+    /// they come back as `Nav`.
+    pub fn review(&mut self, page: &Page, rows: &[(String, String)]) -> Answer<()> {
         let width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
         loop {
             let mut lines = Vec::new();
@@ -542,29 +596,23 @@ impl Ui {
                 "{PAD}{DANGER}▸{RESET} {BOLD}enter{RESET} begins the install. Nothing has been \
                  written yet."
             ));
-            self.footer("enter install · esc back · ctrl-c quit", &mut lines);
+            self.footer(page, "enter install · esc back · ctrl-c quit", &mut lines);
             self.paint(&lines);
             match self.key()? {
-                Key::Enter => return Ok(true),
+                Key::Enter => return Ok(()),
                 Key::Resize => self.resized(),
                 _ => {}
             }
         }
     }
 
-    /// A message with nothing to answer.
+    /// A message with nothing to answer. `Page::help` is how the screens that
+    /// have no "esc back" to offer say so.
     pub fn pause(&mut self, page: &Page) -> Answer<()> {
-        self.pause_with(page, "enter continue · esc back · ctrl-c quit")
-    }
-
-    /// The same, with its own key legend. The last screen of the install has no
-    /// "esc back" to offer, and a footer that says otherwise is a footer people
-    /// stop reading.
-    pub fn pause_with(&mut self, page: &Page, help: &str) -> Answer<()> {
         loop {
             let mut lines = Vec::new();
             self.header(page, &mut lines);
-            self.footer(help, &mut lines);
+            self.footer(page, "enter continue · esc back · ctrl-c quit", &mut lines);
             self.paint(&lines);
             match self.key()? {
                 Key::Enter => return Ok(()),
@@ -626,11 +674,16 @@ impl Ui {
         }
         lines.push(String::new());
         let room = (self.rows as usize).saturating_sub(lines.len() + 3).max(1);
+        let width = (self.cols as usize).saturating_sub(PAD.len() + 4);
         for line in state.tail.iter().rev().take(room).rev() {
-            let cut: String = line.chars().take(self.cols as usize - 6).collect();
+            let cut: String = line.chars().take(width).collect();
             lines.push(format!("{PAD}{DIM}│ {cut}{RESET}"));
         }
-        self.footer("ctrl-c abort", &mut lines);
+        // Not "ctrl-c abort". Nothing reads a key while the install runs, and
+        // raw mode has already turned Ctrl-C into a key event rather than a
+        // signal — so the one footer in this program that would be a promise
+        // instead of a legend does not make one.
+        self.footer(&page, "the install cannot be interrupted", &mut lines);
         self.paint(&lines);
     }
 
@@ -674,6 +727,17 @@ impl Drop for Ui {
     fn drop(&mut self) {
         Ui::restore();
     }
+}
+
+/// The last `width` characters of `text`, for a field whose value has outgrown
+/// the terminal. Counted in characters, not bytes: the values these widgets
+/// hold are typed by a person.
+fn tail_of(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len <= width {
+        return text.to_string();
+    }
+    text.chars().skip(len - width).collect()
 }
 
 /// Spaces needed after `label` to reach the notes column.
@@ -734,5 +798,20 @@ impl Progress {
             self.tail.pop_front();
         }
         self.tail.push_back(line.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_value_keeps_its_tail() {
+        assert_eq!(tail_of("hello", 10), "hello");
+        assert_eq!(tail_of("hello", 5), "hello");
+        // What is being typed stays visible; the beginning is what scrolls off.
+        assert_eq!(tail_of("hello", 2), "lo");
+        assert_eq!(tail_of("héllo", 3), "llo");
+        assert_eq!(tail_of("hello", 0), "");
     }
 }

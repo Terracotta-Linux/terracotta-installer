@@ -40,6 +40,20 @@ use std::path::{Path, PathBuf};
 /// itself out of the manual.
 pub const MNT: &str = "/mnt";
 
+/// The `what` label of the `kiln build` step. Named rather than spelled twice
+/// because `main.rs` matches on it to decide the exit code — 3 for a build
+/// failure, 4 for the system refusing — and a label is otherwise a display
+/// string somebody may reword.
+pub const KILN_BUILD: &str = "kiln build";
+
+/// The name `cryptsetup open` gives the unlocked root container.
+///
+/// Fixed rather than derived: `config::system_toml` writes
+/// `root=/dev/mapper/root` and `rd.luks.name=<uuid>=root` to match, and a name
+/// that could vary would be a second place those two have to agree. `finish()`
+/// closes it under this name, and so does `main.rs` on the failure path.
+pub const LUKS_NAME: &str = "root";
+
 /// libostree's name for Kiln's stateroot, `kiln_ostree::deploy::STATEROOT`.
 /// Named again here because the installer does not link that crate; the check
 /// in `deployment()` is what stops the two from drifting silently.
@@ -139,8 +153,16 @@ impl Installer<'_> {
         step!(ui, p, 5, "this takes a while", self.build(ui, &mut p));
         step!(ui, p, 6, "generation 1", self.deploy(ui, &mut p));
 
-        let dep = deployment(Path::new(MNT), self.run.dry_run)?;
-        step!(ui, p, 7, "fstab, kiln", self.etc(ui, &mut p, &dep, &layout));
+        // Inside the step rather than before it, so a deploy that reported
+        // success and wrote nothing puts the ✘ on `etc` instead of on nothing.
+        let dep = step!(
+            ui,
+            p,
+            7,
+            "fstab, kiln",
+            deployment(Path::new(MNT), self.run.dry_run)
+                .and_then(|dep| self.etc(ui, &mut p, &dep, &layout).map(|()| dep))
+        );
         step!(
             ui,
             p,
@@ -155,7 +177,7 @@ impl Installer<'_> {
             a.username.clone(),
             self.accounts(ui, &mut p, &dep, a)
         );
-        step!(ui, p, 10, "unmounting", self.finish(ui, &mut p));
+        step!(ui, p, 10, "unmounting", self.finish(ui, &mut p, a.encrypt));
 
         p.at = STEPS.len();
         p.detail.clear();
@@ -248,10 +270,7 @@ impl Installer<'_> {
     /// `ps` to every process on the machine) nor the log — `run_stdin`'s own
     /// contract, the same one `chpasswd` relies on in `in_chroot`.
     ///
-    /// The mapper name is fixed at `"root"` rather than derived from
-    /// anything: `config::system_toml` writes `root=/dev/mapper/root` and
-    /// `rd.luks.name=<uuid>=root` to match, and a name that could vary would
-    /// be a second place those two have to agree.
+    /// The mapper name is `LUKS_NAME`; see the note there on why it is fixed.
     fn luks_format_and_open(
         &mut self,
         ui: &mut Ui,
@@ -286,11 +305,11 @@ impl Installer<'_> {
         };
         self.run.run_stdin(
             "cryptsetup open",
-            &["cryptsetup", "open", "--key-file=-", part, "root"],
+            &["cryptsetup", "open", "--key-file=-", part, LUKS_NAME],
             passphrase,
             &mut say,
         )?;
-        Ok(("/dev/mapper/root".to_string(), Some(luks_uuid)))
+        Ok((format!("/dev/mapper/{LUKS_NAME}"), Some(luks_uuid)))
     }
 
     /// vfat for the ESP because UEFI reads nothing else; ext4 for `/boot`
@@ -405,7 +424,7 @@ impl Installer<'_> {
         }
         argv.push("build");
         let mut say = say(ui, p);
-        self.run.run("kiln build", &argv, &mut say)
+        self.run.run(KILN_BUILD, &argv, &mut say)
     }
 
     /// The "make it bootable" step. `kiln build` commits and does not deploy,
@@ -681,12 +700,12 @@ impl Installer<'_> {
         // until the first boot's tmpfiles run. `useradd -m` would otherwise
         // create a home directory through a dangling symlink.
         self.run.run(
-            "seeding /var",
+            "seeding /var/home",
             &["chroot", root, "mkdir", "-p", "-m", "0755", "/var/home"],
             &mut say,
         )?;
         self.run.run(
-            "seeding /var",
+            "seeding /var/roothome",
             &["chroot", root, "mkdir", "-p", "-m", "0700", "/var/roothome"],
             &mut say,
         )?;
@@ -739,13 +758,27 @@ impl Installer<'_> {
         }
     }
 
-    fn finish(&mut self, ui: &mut Ui, p: &mut Progress) -> Done {
+    fn finish(&mut self, ui: &mut Ui, p: &mut Progress, encrypted: bool) -> Done {
         let mut say = say(ui, p);
         // Recursive, and it matters: `/boot` and `/boot/efi` are underneath,
         // and an ESP left mounted is an ESP with dirty pages on it when the
         // machine is powered off.
         self.run
-            .run("umount", &["umount", "--recursive", MNT], &mut say)
+            .run("umount", &["umount", "--recursive", MNT], &mut say)?;
+        if encrypted {
+            // The mapping outlives the unmount, and an open one is what breaks
+            // the *next* thing the user does: `cryptsetup open … root` refuses
+            // a name already in use, `wipefs` and `sgdisk` can be refused on a
+            // disk with a live dm device on it, and `block.rs` reports the disk
+            // just installed to as in use and stops offering it. Best-effort —
+            // the install itself succeeded either way.
+            let _ = self.run.run(
+                "cryptsetup close",
+                &["cryptsetup", "close", LUKS_NAME],
+                &mut say,
+            );
+        }
+        Ok(())
     }
 
     /// Bind the four things a chroot into an OSTree deployment needs.

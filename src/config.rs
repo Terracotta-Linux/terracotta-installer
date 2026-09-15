@@ -10,7 +10,7 @@
 //! | profile, modules, extra packages | `include`, `packages.repo` | image content, plainly |
 //! | the disk's `root=` | `kernel.cmdline` | kargs are fully declarative, so a karg not written down is one the next `kiln apply` removes |
 //! | LUKS unlock (`rd.luks.*`, `dracut_modules = ["crypt"]`, `cryptsetup`) | `kernel.cmdline`, `kernel.dracut_modules`, `packages.repo` | the initramfs unlocks root before anything else runs, so this is exactly as declarative as `root=` itself — see `Answers::luks_uuid` |
-//! | `KEYMAP`, `LANG`, locale generation | `[system]` | Kiln's own `[system]` table now materializes all three; writing them as a `[[file]]` plus a `locale-gen` `[[script]]` is refused outright as of the version that added it — `[system]` owns those targets |
+//! | `KEYMAP`, `LANG`, locale generation | `[system]` | Kiln's `[system]` table materializes all three, and refuses a `[[file]]` or a `locale-gen` `[[script]]` that writes the same targets — two places setting one value is the ambiguity Kiln declines everywhere |
 //!
 //! The generated file is meant to be **read and then edited**. It is the user's
 //! configuration from the moment the installer exits, so it is commented the
@@ -19,6 +19,14 @@
 use crate::interview::Answers;
 
 /// `/etc/kiln/system.toml`, complete.
+///
+/// Every value is interpolated into a TOML string literal with **no escaping**,
+/// and that is safe only because of where the values come from: profiles and
+/// module references are `catalog.rs`'s compile-time constants, and package
+/// names have been through `interview::packages_screen`, whose validator admits
+/// nothing outside `[A-Za-z0-9@._+-]`. Relaxing that validator means adding
+/// escaping here, and the cost of not noticing is a `system.toml` that fails to
+/// parse after the disk has been erased.
 pub fn system_toml(a: &Answers) -> String {
     let mut s = String::new();
 
