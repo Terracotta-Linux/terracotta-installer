@@ -58,8 +58,8 @@ main.rs  preflight::check → interview::ask → Answers → steps::Installer::i
 - **`preflight.rs`** — every check corresponds to a way the install fails *after* the disk is
   erased. Its `Problem`s are hard blocks with no warning channel; do not add a check whose
   right response is "continue anyway".
-- **`interview.rs`** — a state machine, not a run of prompts, because Esc goes back fourteen
-  screens. Produces `Answers`, touches nothing.
+- **`interview.rs`** — a state machine, not a run of prompts, because Esc goes back fifteen
+  screens, one of them (kernel) conditional on the profile. Produces `Answers`, touches nothing.
 - **`steps.rs`** — the only module that writes anything. `STEPS` is the fixed order the
   install runs in, and its order is asserted by tests rather than only commented.
 - **`config.rs`** — `Answers` → `system.toml`. Nothing here writes to the file that the

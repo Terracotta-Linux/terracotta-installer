@@ -23,6 +23,11 @@ pub struct Answers {
     pub locale: String,
     pub keymap: String,
     pub profile: String,
+    /// `Some` only when `profile` is a `-base` profile that picked no
+    /// kernel of its own; set by the kernel screen, `None` otherwise, and
+    /// cleared automatically when the profile changes back to one that
+    /// already picked a kernel.
+    pub kernel: Option<String>,
     pub modules: Vec<String>,
     pub packages: Vec<String>,
     pub username: String,
@@ -71,10 +76,25 @@ const WHEEL_SUDO: &str = "@kiln/security/wheel-sudo";
 /// somebody a machine with no root password and no sudo, so the copy is
 /// checked against a real library in this module's tests.
 fn grants_sudo(profile: &str, modules: &[String]) -> bool {
+    // `-base` differs from its sibling only in which kernel it picks, so
+    // `minimal-base` is exactly as sudo-less as `minimal`.
+    let profile = profile.strip_suffix("-base").unwrap_or(profile);
     profile != "@kiln/profiles/minimal" || modules.iter().any(|m| m == WHEEL_SUDO)
 }
 
-const SCREENS: usize = 14;
+/// Whether the interview should stop at the kernel screen for this profile.
+fn needs_kernel(profiles: &[&'static catalog::Profile], profile: &str) -> bool {
+    profiles
+        .iter()
+        .find(|p| p.module == profile)
+        .is_some_and(|p| p.needs_kernel)
+}
+
+/// The kernel screen's index in `ask`'s `match`. Skipped, in either
+/// direction, whenever the current profile already picked its own kernel.
+const KERNEL_STEP: usize = 8;
+
+const SCREENS: usize = 15;
 
 /// Ask everything. `Ok(None)` is Ctrl-C at any point: nothing has been written,
 /// so quitting is always free.
@@ -89,7 +109,14 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
                 .into()
         });
     }
-    let profiles = catalog::profiles(module_root);
+    let kernels = catalog::kernels(module_root);
+    // A `-base` profile with no kernel to offer next would dead-end at an
+    // empty kernel screen, so a library missing every `@kiln/kernel/*` file
+    // simply does not offer the profiles that depend on one.
+    let profiles: Vec<&'static catalog::Profile> = catalog::profiles(module_root)
+        .into_iter()
+        .filter(|p| !p.needs_kernel || !kernels.is_empty())
+        .collect();
     let extras = catalog::extras(module_root);
     if profiles.is_empty() {
         return Err(format!(
@@ -109,6 +136,7 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
         locale: locales[0].clone(),
         keymap: maps[0].clone(),
         profile: profiles[0].module.into(),
+        kernel: None,
         // The defaults live in `a` from the start rather than being rebuilt by
         // `modules_screen` every time it is drawn: that screen pre-checks from
         // `a.modules`, so a fresh copy of the defaults there would silently
@@ -125,7 +153,17 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
     };
 
     let mut at = 0usize;
+    // Which way the last move went, so a skipped screen can be crossed in
+    // the same direction it was entered from — otherwise Esc out of the
+    // modules screen, past a skipped kernel screen, would bounce forward
+    // again instead of landing on profile.
+    let mut dir: isize = 1;
     loop {
+        if at == KERNEL_STEP && !needs_kernel(&profiles, &a.profile) {
+            a.kernel = None;
+            at = (at as isize + dir).max(0) as usize;
+            continue;
+        }
         let step = (at + 1, SCREENS);
         let outcome = match at {
             0 => disk_screen(ui, step, &disks, &mut a),
@@ -157,21 +195,26 @@ pub fn ask(ui: &mut Ui, run: &mut Runner, module_root: &Path) -> Result<Option<A
                 &mut a.keymap,
             ),
             7 => profile_screen(ui, step, &profiles, &mut a),
-            8 => modules_screen(ui, step, &extras, &mut a),
-            9 => packages_screen(ui, step, &mut a),
-            10 => username_screen(ui, step, &mut a),
-            11 => password_screen(ui, step, &mut a),
-            12 => root_password_screen(ui, step, &mut a),
+            KERNEL_STEP => kernel_screen(ui, step, &kernels, &mut a),
+            9 => modules_screen(ui, step, &extras, &mut a),
+            10 => packages_screen(ui, step, &mut a),
+            11 => username_screen(ui, step, &mut a),
+            12 => password_screen(ui, step, &mut a),
+            13 => root_password_screen(ui, step, &mut a),
             _ => review_screen(ui, step, &a),
         };
         match outcome {
             Ok(()) => {
+                dir = 1;
                 at += 1;
                 if at == SCREENS {
                     return Ok(Some(a));
                 }
             }
-            Err(Nav::Back) => at = at.saturating_sub(1),
+            Err(Nav::Back) => {
+                dir = -1;
+                at = at.saturating_sub(1);
+            }
             Err(Nav::Quit) => return Ok(None),
         }
     }
@@ -370,8 +413,9 @@ fn profile_screen(
 ) -> Screen {
     let page = Page::new(step, "What kind of system is this?")
         .note("A profile is one line of `include` and the packages nobody has an")
-        .note("opinion about. It also picks the kernel — two kernel modules are a")
-        .note("conflict by design, so this is where that choice is made.");
+        .note("opinion about. Most already pick a kernel too — two kernel modules")
+        .note("are a conflict by design — but the \"choose kernel\" ones leave that")
+        .note("to the next screen instead.");
     let options: Vec<Opt> = profiles
         .iter()
         .map(|p| {
@@ -385,6 +429,38 @@ fn profile_screen(
         .collect();
     let i = ui.select(&page, &options)?;
     a.profile = profiles[i].module.into();
+    Ok(())
+}
+
+/// Only reached when `needs_kernel` says the chosen profile picked none of
+/// its own — every other profile skips straight past this screen.
+fn kernel_screen(
+    ui: &mut Ui,
+    step: (usize, usize),
+    kernels: &[&'static catalog::Kernel],
+    a: &mut Answers,
+) -> Screen {
+    let page = Page::new(step, "Which kernel?")
+        .note("The profile you picked leaves this open. Two kernel modules in one")
+        .note("configuration are a conflict Kiln reports on both files, so exactly")
+        .note("one is written.");
+    let current = a
+        .kernel
+        .clone()
+        .unwrap_or_else(|| kernels[0].module.to_string());
+    let options: Vec<Opt> = kernels
+        .iter()
+        .map(|k| {
+            let opt = Opt::new(k.label, k.note);
+            if k.module == current {
+                opt.checked()
+            } else {
+                opt
+            }
+        })
+        .collect();
+    let i = ui.select(&page, &options)?;
+    a.kernel = Some(kernels[i].module.into());
     Ok(())
 }
 
@@ -538,7 +614,13 @@ fn review_screen(ui: &mut Ui, step: (usize, usize), a: &Answers) -> Screen {
             "locale".into(),
             format!("{}  ·  keymap {}", a.locale, a.keymap),
         ),
-        ("profile".into(), short(&a.profile).to_string()),
+        (
+            "profile".into(),
+            match &a.kernel {
+                Some(k) => format!("{}  ·  kernel {}", short(&a.profile), short(k)),
+                None => short(&a.profile).to_string(),
+            },
+        ),
         ("modules".into(), modules),
         ("packages".into(), packages),
         ("user".into(), format!("{} (wheel)", a.username)),

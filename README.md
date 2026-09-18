@@ -89,17 +89,20 @@ Once the install starts it runs to completion. There is no abort key, and the fo
 
 ## ⚙️ What it asks
 
-Fourteen screens, in order:
+Fifteen screens, in order — one of them conditional:
 
 **Disk** → **encryption** → **type the disk name to confirm** → **hostname** → **timezone** →
-**locale** → **console keymap** → **profile** → **extra modules** → **extra packages** →
-**username** → **user password** → **root password** → **review**
+**locale** → **console keymap** → **profile** → *(kernel)* → **extra modules** →
+**extra packages** → **username** → **user password** → **root password** → **review**
 
 A few notes on the less obvious ones:
 
-- **Profile** is `workstation`, `server` or `minimal`. Each one already picks a kernel, which is
-  why there is no separate kernel question: two kernel modules in one configuration are a
-  conflict by design.
+- **Profile** is `workstation`, `server`, `minimal`, or a "choose kernel" sibling of each. The
+  plain three already pick a kernel; two kernel modules in one configuration are a conflict by
+  design, so picking one of those skips the next screen entirely.
+- **Kernel** only appears after a "choose kernel" profile — `linux`, `linux-lts`, `linux-zen`,
+  `linux-hardened` or `linux-rt`. Every other profile already answered this, so the screen is
+  skipped, in both directions, the rest of the time.
 - **Modules** are the rest of Kiln's library, grouped by namespace, with anything your profile
   already covers left out. Every one of them is a single line of `include` you can add or remove
   later with `kiln apply`.
@@ -244,7 +247,7 @@ looking at them.
 |---|---|
 | `main.rs` | Arguments, the panic hook that restores the terminal, and the final screens. |
 | `preflight.rs` | The checks that have to pass before a question is worth asking. |
-| `interview.rs` | The fourteen screens, as a state machine. Touches nothing. |
+| `interview.rs` | The fifteen screens (one conditional), as a state machine. Touches nothing. |
 | `steps.rs` | The only module that writes anything. |
 | `config.rs` | `Answers` into `system.toml`. |
 | `catalog.rs` | The choices on offer, plus locales, timezones and keymaps read from the running system. |

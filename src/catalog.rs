@@ -19,27 +19,90 @@ pub struct Profile {
     pub module: &'static str,
     pub label: &'static str,
     pub note: &'static str,
+    /// True for the `-base` siblings, which drop the profile's own
+    /// `@kiln/kernel/*` include. The interview follows a profile like this
+    /// with a kernel question; the other three already answered it.
+    pub needs_kernel: bool,
 }
 
-/// Profiles are the only modules that compose, and every one of them
-/// already picks a kernel — which is why the interview does not ask about
-/// kernels separately. Swapping one is a five-line edit to the generated
-/// configuration, and the guide says so.
+/// Profiles are the only modules that compose. Most of them already pick a
+/// kernel — two kernel modules in one configuration is a conflict by design
+/// — but each has a `-base` sibling that leaves the choice to the interview
+/// instead, for `needs_kernel` to route to the kernel screen.
 pub const PROFILES: &[Profile] = &[
     Profile {
         module: "@kiln/profiles/workstation",
         label: "workstation",
         note: "desktop machine — networking, audio, bluetooth, printing, sudo",
+        needs_kernel: false,
     },
     Profile {
         module: "@kiln/profiles/server",
         label: "server",
         note: "headless — linux-lts, sshd, nftables, nothing else",
+        needs_kernel: false,
     },
     Profile {
         module: "@kiln/profiles/minimal",
         label: "minimal",
         note: "the smallest image that boots; no network stack at all",
+        needs_kernel: false,
+    },
+    Profile {
+        module: "@kiln/profiles/workstation-base",
+        label: "workstation (choose kernel)",
+        note: "same as workstation, but you pick the kernel next",
+        needs_kernel: true,
+    },
+    Profile {
+        module: "@kiln/profiles/server-base",
+        label: "server (choose kernel)",
+        note: "same as server, but you pick the kernel next",
+        needs_kernel: true,
+    },
+    Profile {
+        module: "@kiln/profiles/minimal-base",
+        label: "minimal (choose kernel)",
+        note: "same as minimal, but you pick the kernel next",
+        needs_kernel: true,
+    },
+];
+
+pub struct Kernel {
+    pub module: &'static str,
+    pub label: &'static str,
+    pub note: &'static str,
+}
+
+/// Offered only after a `-base` profile, since every other profile has
+/// already made this choice. A second kernel module in the same
+/// configuration is a conflict Kiln reports on both files, by design, so
+/// exactly one of these is ever written.
+pub const KERNELS: &[Kernel] = &[
+    Kernel {
+        module: "@kiln/kernel/linux",
+        label: "linux",
+        note: "the current mainline kernel",
+    },
+    Kernel {
+        module: "@kiln/kernel/linux-lts",
+        label: "linux-lts",
+        note: "long-term support, fewer surprises, older hardware",
+    },
+    Kernel {
+        module: "@kiln/kernel/linux-zen",
+        label: "linux-zen",
+        note: "the Zen patch set, desktop latency",
+    },
+    Kernel {
+        module: "@kiln/kernel/linux-hardened",
+        label: "linux-hardened",
+        note: "exploit mitigations, some out-of-tree drivers lost",
+    },
+    Kernel {
+        module: "@kiln/kernel/linux-rt",
+        label: "linux-rt",
+        note: "PREEMPT_RT, bounded scheduling latency",
     },
 ];
 
@@ -193,12 +256,22 @@ pub const EXTRAS: &[Entry] = &[
         "intel-ucode",
         "Intel microcode"
     ),
+    m!(
+        "@kiln/hardware/fwupd",
+        "fwupd",
+        "device firmware updates via fwupdmgr"
+    ),
     Entry::Group("hardware"),
     m!("@kiln/hardware/bluetooth", "bluetooth", "bluez"),
     m!(
         "@kiln/hardware/laptop",
         "laptop",
         "audio DSP firmware, power management"
+    ),
+    m!(
+        "@kiln/hardware/tlp",
+        "tlp",
+        "laptop power management — alternative to `laptop`'s power-profiles-daemon"
     ),
     m!("@kiln/hardware/printing", "printing", "CUPS"),
     Entry::Group("network"),
@@ -297,6 +370,17 @@ pub fn profiles(root: &Path) -> Vec<&'static Profile> {
     PROFILES
         .iter()
         .filter(|p| module_file(root, p.module).is_file())
+        .collect()
+}
+
+/// The kernels the host's library actually has. A `-base` profile whose
+/// library has none of these would dead-end at an empty kernel screen, so
+/// `interview::ask` drops `needs_kernel` profiles from its own list when
+/// this comes back empty.
+pub fn kernels(root: &Path) -> Vec<&'static Kernel> {
+    KERNELS
+        .iter()
+        .filter(|k| module_file(root, k.module).is_file())
         .collect()
 }
 
@@ -505,6 +589,9 @@ mod tests {
         for p in PROFILES {
             assert!(p.module.starts_with("@kiln/profiles/"), "{}", p.module);
         }
+        for k in KERNELS {
+            assert!(k.module.starts_with("@kiln/kernel/"), "{}", k.module);
+        }
     }
 
     /// The catalog is a copy of Kiln's module library, and a copy in another
@@ -529,6 +616,11 @@ mod tests {
                 }
             }
         }
+        for k in KERNELS {
+            if !module_file(&root, k.module).is_file() {
+                missing.push(k.module);
+            }
+        }
         assert!(
             missing.is_empty(),
             "the catalog offers modules {} does not have: {missing:?}",
@@ -541,6 +633,7 @@ mod tests {
         let none = Path::new("/nonexistent-module-root");
         assert!(profiles(none).is_empty());
         assert!(extras(none).is_empty());
+        assert!(kernels(none).is_empty());
     }
 
     /// A heading whose whole namespace filtered away would render as a label

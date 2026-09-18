@@ -37,6 +37,11 @@ pub fn system_toml(a: &Answers) -> String {
     // dedicated diagnostic for it that nobody should have to see on day one.
     s.push_str("include = [\n");
     s.push_str(&format!("  \"{}\",\n", a.profile));
+    // Only a `-base` profile leaves this `Some`; every other profile already
+    // named its own kernel module inside `a.profile`.
+    if let Some(k) = &a.kernel {
+        s.push_str(&format!("  \"{k}\",\n"));
+    }
     for m in &a.modules {
         s.push_str(&format!("  \"{m}\",\n"));
     }
@@ -126,6 +131,7 @@ mod tests {
             locale: "en_US.UTF-8".into(),
             keymap: "us".into(),
             profile: "@kiln/profiles/workstation".into(),
+            kernel: None,
             modules: vec!["@kiln/gpu/amd".into()],
             packages: vec!["neovim".into()],
             username: "ada".into(),
@@ -144,6 +150,25 @@ mod tests {
         a.passphrase = "correct horse battery staple".into();
         a.luks_uuid = Some("deadbeef-dead-beef-dead-beefdeadbeef".into());
         a
+    }
+
+    #[test]
+    fn a_base_profiles_kernel_is_written_into_include() {
+        let mut a = answers();
+        a.profile = "@kiln/profiles/workstation-base".into();
+        a.kernel = Some("@kiln/kernel/linux-zen".into());
+        let toml = system_toml(&a);
+        assert!(
+            toml.contains("\"@kiln/profiles/workstation-base\""),
+            "{toml}"
+        );
+        assert!(toml.contains("\"@kiln/kernel/linux-zen\""), "{toml}");
+    }
+
+    #[test]
+    fn no_kernel_writes_nothing_extra() {
+        let toml = system_toml(&answers());
+        assert!(!toml.contains("@kiln/kernel/"), "{toml}");
     }
 
     #[test]
