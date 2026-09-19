@@ -220,6 +220,12 @@ pub const EXTRAS: &[Entry] = &[
         "xfce",
         "the full xfce4 and xfce4-goodies groups"
     ),
+    m!(
+        "@kiln/desktop/budgie",
+        "budgie",
+        "session, panel and LightDM"
+    ),
+    m!("@kiln/desktop/lxqt", "lxqt", "session, Openbox and SDDM"),
     Entry::Group("window managers"),
     m!("@kiln/wm/hyprland", "hyprland", "Wayland, dynamic tiling"),
     m!("@kiln/wm/sway", "sway", "Wayland, i3-compatible"),
@@ -243,6 +249,11 @@ pub const EXTRAS: &[Entry] = &[
         "@kiln/gpu/nvidia-open-dkms",
         "nvidia-open-dkms",
         "built via DKMS at image-build time — for linux-zen, linux-hardened, linux-rt"
+    ),
+    m!(
+        "@kiln/gpu/nvidia-580xx-dkms",
+        "nvidia-580xx-dkms",
+        "AUR, proprietary — for Maxwell/Pascal cards nvidia-open no longer covers"
     ),
     m!(
         "@kiln/gpu/nvidia-cuda",
@@ -297,6 +308,11 @@ pub const EXTRAS: &[Entry] = &[
         "tailscale",
         "enabled at boot; join the tailnet yourself"
     ),
+    m!(
+        "@kiln/net/wireguard",
+        "wireguard",
+        "tools only — no tunnel enabled; configure /etc/wireguard yourself"
+    ),
     Entry::Group("audio"),
     m!(
         "@kiln/audio/pipewire",
@@ -311,6 +327,12 @@ pub const EXTRAS: &[Entry] = &[
     ),
     m!("@kiln/dev/rust", "rust", "rustup-free Rust toolchain"),
     m!("@kiln/dev/go", "go", "Go toolchain"),
+    m!(
+        "@kiln/dev/python",
+        "python",
+        "interpreter, pip, sqlite/tk extras, poetry"
+    ),
+    m!("@kiln/dev/node", "node", "runtime, npm, pnpm and yarn"),
     Entry::Group("virtualization"),
     m!("@kiln/virt/podman", "podman", "rootless containers"),
     m!(
@@ -329,12 +351,22 @@ pub const EXTRAS: &[Entry] = &[
         "distrobox",
         "containers that feel like the host — needs podman, docker or lilipod"
     ),
-    m!("@kiln/virt/libvirt", "libvirt", "QEMU/KVM"),
+    m!("@kiln/virt/libvirt", "libvirt", "QEMU/KVM, managed"),
+    m!(
+        "@kiln/virt/qemu",
+        "qemu",
+        "bare QEMU — no libvirt daemon, script VMs directly"
+    ),
     Entry::Group("security"),
     m!(
         "@kiln/security/wheel-sudo",
         "wheel-sudo",
         "members of `wheel` may sudo"
+    ),
+    m!(
+        "@kiln/security/doas",
+        "doas",
+        "opendoas — alternative to wheel-sudo"
     ),
     m!("@kiln/security/apparmor", "apparmor", "AppArmor, enforcing"),
     Entry::Group("system"),
