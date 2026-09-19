@@ -104,6 +104,11 @@ pub const KERNELS: &[Kernel] = &[
         label: "linux-rt",
         note: "PREEMPT_RT, bounded scheduling latency",
     },
+    Kernel {
+        module: "@kiln/kernel/linux-rt-lts",
+        label: "linux-rt-lts",
+        note: "PREEMPT_RT on the LTS base",
+    },
 ];
 
 pub struct Module {
